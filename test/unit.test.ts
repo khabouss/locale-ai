@@ -1094,6 +1094,50 @@ test("Apple .xcstrings: translating several locales in one run shares the file w
   assert.equal(final.strings.Settings.localizations.fr.stringUnit.state, "needs_review");
 });
 
+test("Apple .xcstrings: writes Xcode's own \"key\" : value colon spacing, so a no-op rerun is byte-identical", () => {
+  // JSON.stringify's pretty-printer writes "key": value; Xcode's own serializer
+  // writes "key" : value (a space before the colon too) — the mismatch alone used to
+  // put the whole file in the diff on every run, translated or not.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-xcstrings-colon-"));
+  const file = path.join(dir, "Localizable.xcstrings");
+  const text = [
+    "{",
+    '  "sourceLanguage" : "en",',
+    '  "strings" : {',
+    '    "Time: %@" : {',
+    '      "localizations" : {',
+    '        "en" : {',
+    '          "stringUnit" : {',
+    '            "state" : "translated",',
+    '            "value" : "Time: %@"',
+    "          }",
+    "        },",
+    '        "fr" : {',
+    '          "stringUnit" : {',
+    '            "state" : "translated",',
+    '            "value" : "FR:Time: %@"',
+    "          }",
+    "        }",
+    "      }",
+    "    }",
+    "  },",
+    '  "version" : "1.0"',
+    "}",
+    "",
+  ].join("\n");
+  fs.writeFileSync(file, text);
+
+  const doc = readLocaleDoc(file, "en", true);
+  const existing = readLocaleDoc(file, "fr").data;
+  assert.deepEqual(pendingStrings(doc.data, existing, false), [], "already translated: nothing pending");
+  const built = buildTarget(doc.data, existing, (s) => `[translated] ${s}`, false);
+  const out = doc.serialize(built, "fr", text);
+  assert.equal(out, text, "a no-op rerun reproduces Xcode's own colon spacing byte-for-byte");
+
+  // A colon inside a string's own text (not a JSON key-value separator) is never touched.
+  assert.match(out, /"value" : "FR:Time: %@"/);
+});
+
 test("flattenStrings: key paths for nested objects and arrays", () => {
   assert.deepEqual(flattenStrings({ a: "x", b: { c: "y" }, d: ["p", "q"] }), [
     { path: "a", value: "x" },
