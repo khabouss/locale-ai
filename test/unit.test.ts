@@ -1899,15 +1899,63 @@ test("gettext .po: msgid is the stable key; plural entries are translated and ex
   // French (nplurals=2): index 0 from the singular-sourced translation, index 1 from the plural-sourced one.
   assert.match(text, /msgid_plural "items_plural"\nmsgstr\[0\] "un article"\nmsgstr\[1\] "plusieurs articles"/);
 
-  // Arabic (nplurals=6): all indices past 0 get the plural-sourced translation.
+  // Arabic (nplurals=6): index 0 is the "zero" category, not the singular — real
+  // gettext/ngettext picks index 1 for n==1, so the singular-sourced translation
+  // goes there, and every OTHER index (0, 2-5) gets the plural-sourced one.
   const arBuilt = { "\u0004items\u0005one": "عنصر واحد", "\u0004items\u0005other": "عناصر" };
   const arText = doc.serialize(arBuilt, "ar");
-  assert.match(arText, /msgstr\[0\] "عنصر واحد"/);
-  for (let i = 1; i < 6; i++) assert.match(arText, new RegExp(`msgstr\\[${i}\\] "عناصر"`));
+  assert.match(arText, /msgstr\[1\] "عنصر واحد"/);
+  for (const i of [0, 2, 3, 4, 5]) assert.match(arText, new RegExp(`msgstr\\[${i}\\] "عناصر"`));
 
   // A target with no translation yet falls back to the English msgid/msgid_plural, not empty strings.
   const untouched = doc.serialize({}, "es");
   assert.match(untouched, /msgstr\[0\] "items"\nmsgstr\[1\] "items_plural"/);
+});
+
+test("gettext .po: Arabic's singular form lands in msgstr[1] (its own \"one\" slot), not msgstr[0] (\"zero\")", () => {
+  // Real gettext: Arabic's Plural-Forms resolves n==0 to index 0 ("zero") and n==1 to
+  // index 1 ("one") — unlike every other language this project hardcodes, where n==1
+  // is always index 0. Verified against real msgfmt/ngettext, not just this test.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-po-ar-plural-"));
+  const file = path.join(root, "en.po");
+  fs.writeFileSync(
+    file,
+    [
+      'msgid ""',
+      'msgstr ""',
+      '"Content-Type: text/plain; charset=UTF-8\\n"',
+      '"Language: en\\n"',
+      '"Plural-Forms: nplurals=2; plural=(n != 1);\\n"',
+      "",
+      'msgid "file_one"',
+      'msgid_plural "file_other"',
+      'msgstr[0] "You have %d file"',
+      'msgstr[1] "You have %d files"',
+      "",
+    ].join("\n"),
+  );
+  const doc = readLocaleDoc(file, "en", true, true);
+  const built = { "\u0004file_one\u0005one": "ملف واحد %d", "\u0004file_one\u0005other": "%d ملفات" };
+  const out = doc.serialize(built, "ar");
+  assert.match(out, /msgstr\[0\] "%d ملفات"/, "index 0 (\"zero\") gets the plural-sourced form");
+  assert.match(out, /msgstr\[1\] "ملف واحد %d"/, "index 1 (\"one\") gets the singular-sourced form");
+  for (const i of [2, 3, 4, 5]) assert.match(out, new RegExp(`msgstr\\[${i}\\] "%d ملفات"`));
+
+  // Reading that same Arabic file back as an existing target recovers the right
+  // singular text from its own "one" slot (index 1), not index 0.
+  const arFile = path.join(root, "ar.po");
+  fs.writeFileSync(arFile, out);
+  const target = readLocaleDoc(arFile, "ar", false);
+  assert.equal(JSON.stringify(target.data), JSON.stringify({ "\u0004file_one\u0005one": "ملف واحد %d", "\u0004file_one\u0005other": "%d ملفات" }));
+
+  // A translator reviews and clears the fuzzy flag; a rerun with nothing else
+  // changed must not re-add it. Before this fix, forms[0] held the "zero" text,
+  // which never equals the "one" value, so a changed check against index 0 saw
+  // Arabic entries as changed on every single run and kept re-flagging them fuzzy
+  // even after a translator had cleared it.
+  const reviewed = out.replace("#, fuzzy\n", "");
+  const rerun = doc.serialize(built, "ar", reviewed);
+  assert.ok(!rerun.includes("#, fuzzy"), "the cleared fuzzy flag must not come back when nothing changed");
 });
 
 test("gettext .po: a template source (empty msgstr) falls back to msgid, never for a target file", () => {

@@ -373,7 +373,7 @@ export function readLocaleDoc(file: string, tag: string, isSource = false, fuzzy
   const text = readText(file);
   const ext = path.extname(file).toLowerCase();
   if (ext === ".yaml" || ext === ".yml") return readYamlDoc(file, text, tag);
-  if (ext === ".po" || ext === ".pot") return readPoDoc(file, text, isSource, fuzzy);
+  if (ext === ".po" || ext === ".pot") return readPoDoc(file, text, isSource, fuzzy, tag);
   if (ext === ".arb") return readArbDoc(file, text);
   if (ext === ".strings") return readStringsDoc(file, text);
   if (ext === ".properties") return readPropertiesDoc(file, text);
