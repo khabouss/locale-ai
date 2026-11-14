@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
-import { writeFileAtomic } from "./fs-atomic.ts";
+import { withFileLock, writeFileAtomic } from "./fs-atomic.ts";
 
 /**
  * Tracks, per source file, key path and TARGET LOCALE, the source string last
@@ -192,4 +192,36 @@ export function pruneDeletedKeys(lock: LockFile, fileKey: string, currentPaths: 
     if (!key.startsWith(prefix)) continue;
     if (!keep.has(key.slice(prefix.length))) delete lock.entries[key];
   }
+}
+
+/**
+ * Persists `pending`'s entries (built with `recordEntries` against an initially
+ * empty `LockFile`, never against the one `translate`/`accept` loaded at the
+ * start of the run) by merging them into a copy of the lock re-read fresh from
+ * disk right before writing, rather than writing back the in-memory snapshot
+ * loaded at the start of a possibly-long translation run.
+ *
+ * Without this, two `locale-ai` runs started close together — e.g. separate
+ * `translate --to fr` and `translate --to es` processes, both racing on the
+ * same project's lock file — each load the same starting snapshot, and
+ * whichever finishes and calls `saveLock` last overwrites the other's
+ * history entirely: translating "es" would silently erase the lock's record
+ * of "fr" ever having been translated (the translated files on disk are
+ * unaffected — only the lock's edit/staleness tracking is lost). The merge
+ * itself is wrapped in `withFileLock` so the "read the current file, merge
+ * in, write it back" sequence is also atomic across processes, not just the
+ * final write.
+ *
+ * `pruneSpecs` re-applies this run's `pruneDeletedKeys` calls against that
+ * fresh copy too — safe to redo because which paths still exist in the
+ * current source is a plain fact of this run, independent of what any
+ * concurrent process wrote.
+ */
+export function mergeAndSaveLock(lockPath: string, pending: LockFile, pruneSpecs: Array<{ fileKey: string; currentPaths: Iterable<string> }> = []): void {
+  withFileLock(`${lockPath}.mutex`, () => {
+    const fresh = loadLock(lockPath);
+    for (const { fileKey: fk, currentPaths } of pruneSpecs) pruneDeletedKeys(fresh, fk, currentPaths);
+    for (const [key, tagMap] of Object.entries(pending.entries)) Object.assign((fresh.entries[key] ??= {}), tagMap);
+    saveLock(lockPath, fresh);
+  });
 }

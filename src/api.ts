@@ -15,7 +15,7 @@ import { writeFileAtomic } from "./fs-atomic.ts";
 import { glossaryLookup, loadConfig, protectRegex, type ProjectConfig } from "./glossary.ts";
 import { extractIcu, isIcuComplex } from "./icu.ts";
 import { intlCode, parseLocale, type Locale } from "./lang.ts";
-import { editedPaths, isEdited, isSourceStale, LOCK_FILENAME, loadLock, pruneDeletedKeys, recordEntries, saveLock, type LockFile } from "./lock.ts";
+import { editedPaths, isEdited, isSourceStale, LOCK_FILENAME, loadLock, mergeAndSaveLock, recordEntries, type LockFile } from "./lock.ts";
 import {
   addNestedPluralForms,
   addPluralForms,
@@ -329,6 +329,8 @@ export async function translate(opts: TranslateOptions): Promise<TranslateResult
 
     let written = 0;
     let pluralsAdded = 0;
+    const pending: LockFile = { version: 3, entries: {} };
+    const pruneSpecs: Array<{ fileKey: string; currentPaths: Iterable<string> }> = [];
     for (const f of job.files) {
       const lockKey = fileKey(f.source, lockDir);
       const srcFlat = flattenStrings(f.doc.data);
@@ -370,21 +372,20 @@ export async function translate(opts: TranslateOptions): Promise<TranslateResult
       }
       const outFlat = new Map(flattenStrings(plural.doc).map((e) => [e.path, e.value]));
       recordEntries(
-        lock,
+        pending,
         lockKey,
         job.locale.tag,
         srcFlat
           .filter(({ path: p, value }) => translatedSet.has(p) && !unresolved.has(value))
           .map(({ path: p, value }) => ({ path: p, source: value, written: outFlat.get(p) ?? "" })),
       );
-      recordEntries(lock, lockKey, job.locale.tag, pluralDerived.map(({ path: p, value }) => ({ path: p, source: value, written: value })));
-      pruneDeletedKeys(lock, lockKey, [
-        ...srcFlat.map((e) => e.path),
-        ...pluralDerived.map((d) => d.path),
-        ...pluralEdited.map((e) => e.path),
-      ]);
+      recordEntries(pending, lockKey, job.locale.tag, pluralDerived.map(({ path: p, value }) => ({ path: p, source: value, written: value })));
+      pruneSpecs.push({
+        fileKey: lockKey,
+        currentPaths: [...srcFlat.map((e) => e.path), ...pluralDerived.map((d) => d.path), ...pluralEdited.map((e) => e.path)],
+      });
     }
-    if (jobs.length) saveLock(lockPath, lock);
+    if (jobs.length) mergeAndSaveLock(lockPath, pending, pruneSpecs);
     const durationMs = Date.now() - started;
     const route = job.route.map((h) => h.model.id);
     const issuesForLocale = allIssues.filter((i) => i.locale === job.locale.tag).length;
@@ -559,6 +560,7 @@ export async function accept(opts: AcceptOptions = {}): Promise<AcceptResult> {
   const sources = sourceFiles(layout, from.tag).map((f) => ({ file: f, doc: readLocaleDoc(f, from.tag, true) }));
 
   let accepted = 0;
+  const pending: LockFile = { version: 3, entries: {} };
   for (const to of tags) {
     for (const { file, doc } of sources) {
       const target = targetFile(layout, from.tag, to, file);
@@ -573,10 +575,10 @@ export async function accept(opts: AcceptOptions = {}): Promise<AcceptResult> {
         .filter((e) => (wanted ? wanted.has(e.path) : isEdited(lock, lockKey, e.path, to, e.value)))
         .map((e) => ({ path: e.path, source: srcByPath.get(e.path) ?? e.value, written: e.value }));
       if (!entries.length) continue;
-      recordEntries(lock, lockKey, to, entries);
+      recordEntries(pending, lockKey, to, entries);
       accepted += entries.length;
     }
   }
-  saveLock(lockPath, lock);
+  mergeAndSaveLock(lockPath, pending);
   return { locales: tags, accepted, lockFile: lockPath };
 }
