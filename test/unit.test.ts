@@ -1593,6 +1593,27 @@ test("XLIFF 1.2: detection via --input (untagged source), target filename conven
   assert.deepEqual(existingTargets(layout, "en"), ["fr"]);
 });
 
+test("XLIFF 2.0 is rejected with a clear error instead of silently translating nothing", () => {
+  // XLIFF 2.0 restructured <trans-unit>/<source>/<target> into <unit><segment>
+  // <source>/<target></segment></unit>, which parseXliffUnits doesn't recognize at
+  // all — previously this matched zero units, so translate reported success with 0
+  // strings translated and wrote an untouched copy, with no indication anything was
+  // wrong.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-xliff2-"));
+  const file = path.join(root, "messages.xlf");
+  fs.writeFileSync(
+    file,
+    `<?xml version="1.0" encoding="UTF-8"?>
+<xliff version="2.0" xmlns="urn:oasis:names:tc:xliff:document:2.0" srcLang="en">
+    <file id="f1">
+        <unit id="greeting"><segment><source>Hello</source></segment></unit>
+    </file>
+</xliff>
+`,
+  );
+  assert.throws(() => readLocaleDoc(file, "en", true), /only XLIFF 1\.2 is supported.*version 2\.x/);
+});
+
 test("XLIFF 1.2: inline <x>/<g> markup survives translation like any other protected tag; translate=\"no\" and bpt/ept are left untouched", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-xliff-rw-"));
   const file = path.join(root, "messages.xlf");
