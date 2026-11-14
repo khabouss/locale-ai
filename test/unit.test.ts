@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -2075,22 +2076,38 @@ test("download: a full disk during a write rejects with ENOSPC instead of hangin
   // A write-stream that has already errored (e.g. ENOSPC) never emits 'drain' again,
   // so code that awaits only 'drain' after a backpressured write hangs on that promise
   // forever — and with nothing else keeping the event loop alive, Node then exits the
-  // whole process on its own, silently, with no thrown error and exit code 0. Writing
-  // to /dev/full (always ENOSPC on write) reproduces the real failure without needing
-  // an actually-full filesystem.
+  // whole process on its own, silently, with no thrown error and exit code 0. A fake
+  // write stream reproduces the exact race (write() returns false, only 'error' ever
+  // fires, 'drain' never does) without depending on a real full disk or /dev/full,
+  // which isn't writable/available the same way on every CI runner.
   const origFetch = global.fetch;
+  const origCreateWriteStream = fs.createWriteStream;
   global.fetch = (async () => ({
     ok: true,
     body: (async function* () {
-      for (let i = 0; i < 50; i++) yield new Uint8Array(1 << 20); // 50 x 1MB chunks
+      for (let i = 0; i < 5; i++) yield new Uint8Array(1 << 20); // 5 x 1MB chunks
     })(),
   })) as typeof fetch;
+  (fs as unknown as { createWriteStream: typeof fs.createWriteStream }).createWriteStream = ((): fs.WriteStream => {
+    const ee = new EventEmitter();
+    let first = true;
+    const stream = ee as unknown as fs.WriteStream;
+    stream.write = (() => {
+      if (!first) return true;
+      first = false;
+      queueMicrotask(() => ee.emit("error", Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC" })));
+      return false; // backpressure: the caller must wait for 'drain' (never comes) or 'error'
+    }) as typeof stream.write;
+    stream.end = ((cb?: () => void) => cb?.()) as typeof stream.end;
+    return stream;
+  }) as typeof fs.createWriteStream;
   try {
     const mod = await import(`../src/models.ts?t=${Date.now()}-${Math.random()}`);
-    const file = { path: "x.bin", size: 50 * (1 << 20), gitSha1: "deadbeef" };
-    await assert.rejects(mod.download("http://example.invalid/x.bin", "/dev/full", file, () => {}), /ENOSPC|no space/i);
+    const file = { path: "x.bin", size: 5 * (1 << 20), gitSha1: "deadbeef" };
+    await assert.rejects(mod.download("http://example.invalid/x.bin", "/tmp/lai-download-test/x.bin", file, () => {}), /ENOSPC|no space/i);
   } finally {
     global.fetch = origFetch;
+    fs.createWriteStream = origCreateWriteStream;
   }
 });
 
