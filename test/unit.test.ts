@@ -1075,6 +1075,41 @@ test("YAML: a merge key or a plain alias no longer crashes the whole file, and d
   );
 });
 
+test("YAML: a merge key stays exactly where it was in the source, not moved to the end of the map", () => {
+  // The `yaml` package (and PyYAML) give an explicit key priority over a `<<` merge
+  // key regardless of where `<<` sits in the map, but Ruby's Psych (what Rails uses)
+  // applies `<<` where it textually appears — so if `reorderToMatch` moved `<<` after
+  // an overriding key, Ruby would apply the merge LAST and silently discard the
+  // override. Confirmed against real Ruby/Psych, not just this project's own reading
+  // of the YAML spec.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-yaml-merge-order-"));
+  const file = path.join(root, "en.yml");
+  fs.writeFileSync(
+    file,
+    "defaults: &defaults\n  save: Save\n  cancel: Cancel\nprofile:\n  <<: *defaults\n  save: Save profile\n  title: Profile\n",
+  );
+  const doc = readLocaleDoc(file, "en");
+  const out = doc.serialize(
+    {
+      defaults: { save: "FR:Save", cancel: "FR:Cancel" },
+      profile: { save: "FR:Save profile", cancel: "FR:Cancel", title: "FR:Profile" },
+    },
+    "fr",
+  );
+  assert.match(out, /profile:\n {2}<<: \*defaults\n {2}save: FR:Save profile/, out);
+
+  // Still holds on a rerun over an existing target, with a brand-new key added alongside it.
+  const rerun = doc.serialize(
+    {
+      defaults: { save: "FR:Save", cancel: "FR:Cancel" },
+      profile: { save: "FR:Save profile", cancel: "FR:Cancel", title: "FR:Profile", subtitle: "FR:Subtitle" },
+    },
+    "fr",
+    out,
+  );
+  assert.match(rerun, /profile:\n {2}<<: \*defaults\n {2}save: FR:Save profile/, rerun);
+});
+
 test("Rails-style YAML: single top-level key matching the locale tag is unwrapped, and rewrapped under the target's tag", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-yaml-rails-"));
   const file = path.join(root, "en.yml");
