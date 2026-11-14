@@ -28,7 +28,7 @@ export interface EngineOptions {
   onProgress?: (done: number, total: number) => void;
 }
 
-export type IssueKind = "placeholder-fallback" | "suspicious-length" | "repetition" | "edited" | "conflict";
+export type IssueKind = "placeholder-fallback" | "suspicious-length" | "repetition" | "empty-tag" | "edited" | "conflict";
 
 export interface Issue {
   source: string;
@@ -191,8 +191,21 @@ async function attempt(
     failed.push(...units.filter((u) => !numericStyleSafe(u.text)));
     units = units.filter((u) => numericStyleSafe(u.text));
   }
+  // A "natural"-style open/close tag pair (<1>...</1>) whose own numbered id a model
+  // seems to learn as its own kind of do-not-translate marker, similar to {0} — the
+  // content between them disappearing entirely ("<a href=...>here</a>" -> an empty
+  // link) has been observed on a real hop even though the surrounding sentence
+  // translates fine. Only flagged when the source itself wasn't already an
+  // intentionally empty pair.
+  const EMPTY_TAG_RE = /<(\d+)>\s*<\/\1>/;
   const suspicionKind = (src: string, o: string): IssueKind | undefined =>
-    o.length > 3 * src.length + 20 ? "suspicious-length" : /(\b\p{L}+\b)(?:\W+\1\b){3,}/u.test(o) ? "repetition" : undefined;
+    o.length > 3 * src.length + 20
+      ? "suspicious-length"
+      : /(\b\p{L}+\b)(?:\W+\1\b){3,}/u.test(o)
+        ? "repetition"
+        : EMPTY_TAG_RE.test(o) && !EMPTY_TAG_RE.test(src)
+          ? "empty-tag"
+          : undefined;
 
   const jobs = units.map((unit) => {
     const masked = mask(unit.text, style, opts.protect);

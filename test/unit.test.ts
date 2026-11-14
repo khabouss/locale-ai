@@ -62,6 +62,10 @@ test("mask protects common placeholder syntaxes", () => {
     // restructuring the sentence the way the target language needs.
     ["{name}’s profile was updated.", ["{name}"]],
     ["“{0}' trailing", ["{0}"]],
+    // XLIFF/.resx text that documents a tag literally (already entity-escaped in the
+    // XML itself) — masked as one unit, not split into "&lt;" + a bare, unprotected
+    // tag name + "&gt;" by the generic entity-reference pattern below it.
+    ["Use &lt;b&gt; tags to bold text.", ["&lt;b&gt;"]],
   ];
   for (const [input, expected] of cases) {
     assert.deepEqual(mask(input).tokens, expected, input);
@@ -1615,6 +1619,28 @@ test("XLIFF 1.2: inline <x>/<g> markup survives translation like any other prote
   assert.match(out3, /<target state="translated">Salut \(ancien\) !<\/target>/);
 });
 
+test("XLIFF 1.2: text that documents a tag literally (&lt;b&gt;) round-trips as valid, escaped XML, not a raw tag", () => {
+  // Source text that merely shows markup as an example ("Use <b> tags...") is escaped
+  // in the XML itself (&lt;b&gt;). Unescaping it at read time the same way as genuine
+  // inline markup turns it into an indistinguishable raw "<b>" — which the model is
+  // then free to carry through verbatim, and which escapeXmlKeepTags, unable to tell
+  // it apart from a real tag, would leave unescaped on write, breaking the XML.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-xliff-escaped-tag-"));
+  const file = path.join(root, "messages.xlf");
+  fs.writeFileSync(
+    file,
+    `<xliff version="1.2"><file source-language="en"><body>
+      <trans-unit id="help"><source>Use &lt;b&gt; tags to bold text.</source></trans-unit>
+    </body></file></xliff>\n`,
+  );
+  const doc = readLocaleDoc(file, "en", true);
+  assert.equal((doc.data as { help: string }).help, "Use &lt;b&gt; tags to bold text.");
+
+  const out = doc.serialize({ help: "Utilisez des &lt;b&gt; balises pour mettre le texte en gras." }, "fr");
+  assert.match(out, /<target>Utilisez des &lt;b&gt; balises pour mettre le texte en gras\.<\/target>/);
+  assert.ok(!out.includes("<b>"), "the escaped tag-looking text must never become a raw, unescaped tag");
+});
+
 test("XLIFF 1.2: translate='no' (single quotes) is honored, and a self-closing <target/> is replaced in place rather than duplicated", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-xliff-quotes-"));
   const file = path.join(root, "messages.xlf");
@@ -2133,6 +2159,40 @@ test("engine: a suspicious batched output is retried alone, and the clean retry 
   const r2 = await translateStrings(["Good morning"], [stuck], { sourceLang: "en", targetLang: "fr", batchSize: 4 });
   assert.equal(r2.translations.get("Good morning"), "Non non non non non");
   assert.ok(r2.issues.some((i) => i.kind === "repetition"));
+});
+
+test("engine: an inline tag whose content comes back empty is retried alone, and reported if it still comes back empty", async () => {
+  // Simulates a real bug: a model sometimes learns a "natural"-style tag pair's own
+  // numbered id (<0>...</0>) as a do-not-translate marker like {0}, and drops its
+  // content entirely — "Read the <a href=...>terms</a>." -> an empty link — even
+  // though the rest of the sentence translates fine. Batch-dependent, like other
+  // quantization noise: dropped only when batched with another string.
+  const dropsTagContentWhenBatched: Translator = {
+    translate: async (texts) =>
+      texts.map((s) => {
+        if (!s.includes("<0>")) return s;
+        const translated = s.replace("Read the", "Lea los");
+        return texts.length > 1 ? translated.replace(/<0>.*?<\/0>/, "<0></0>") : translated.replace("terms", "términos");
+      }),
+    dispose: async () => {},
+  };
+  const source = 'Read the <a href="/terms">terms</a>.';
+  const batched = await translateStrings([source, "Good night"], [dropsTagContentWhenBatched], {
+    sourceLang: "en",
+    targetLang: "es",
+    batchSize: 4,
+  });
+  assert.equal(batched.translations.get(source), 'Lea los <a href="/terms">términos</a>.');
+  assert.equal(batched.issues.length, 0, "the solo retry succeeded, so nothing is reported");
+
+  // When even the solo retry still comes back empty, the (flawed) output ships and is reported.
+  const alwaysDropsTagContent: Translator = {
+    translate: async (texts) => texts.map((s) => (s.includes("<0>") ? s.replace(/<0>.*?<\/0>/, "<0></0>").replace("Read the", "Lea los") : s)),
+    dispose: async () => {},
+  };
+  const r2 = await translateStrings([source], [alwaysDropsTagContent], { sourceLang: "en", targetLang: "es", batchSize: 4 });
+  assert.equal(r2.translations.get(source), 'Lea los <a href="/terms"></a>.');
+  assert.ok(r2.issues.some((i) => i.kind === "empty-tag"));
 });
 
 test("engine: an i18next _one string is retranslated with a literal 1, fixing the wrong plural noun", async () => {
