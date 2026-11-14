@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.16
+
+- **A legitimately empty source string (`""`) was re-"translated" on every run, forever** — `needsTranslation` treated any empty-string target as unfinished without checking whether the source is also empty, in which case an empty target is already the correct, final translation. This silently broke the documented "re-runs are a no-op" guarantee: a locale file with an empty string anywhere would report `N strings translated, 0 files written` on every single run, never settling. Found during post-release deep testing of v0.7.15 against adversarial fixtures (empty and whitespace-only values). Fixed by only requiring re-translation of an empty target when the source itself is non-empty ([khabouss/locale-ai#26](https://github.com/khabouss/locale-ai/issues/26)).
+
 ## 0.7.15
 
 - **Sentence-splitting lost cross-sentence grammatical agreement** — each sentence of a multi-sentence string was translated independently, so a pronoun in a later sentence couldn't agree with a noun's gender from an earlier one (en→fr "Your export is ready. It will be..." gave "Il sera...", not the correct "Elle sera...", since "exportation" is feminine). A multi-sentence string is now translated as a whole first, and only falls back to the existing per-sentence path when the result looks like it dropped or merged a sentence — the exact failure mode per-sentence translation exists to avoid in the first place ([khabouss/locale-ai#24](https://github.com/khabouss/locale-ai/issues/24)).

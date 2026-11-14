@@ -213,6 +213,23 @@ test("pendingStrings/buildTarget: isStale forces re-translation of a non-empty t
   assert.equal(JSON.stringify(built), JSON.stringify({ a: "[Hello]", b: "Monde" }));
 });
 
+test("pendingStrings/buildTarget: a legitimately empty source string is not perpetually re-translated", () => {
+  // Regression: needsTranslation used to treat any empty-string target as
+  // unfinished, even when the source itself is "" (so the target is already
+  // correct) — a second run would re-"translate" it forever, violating the
+  // "re-runs are a no-op" guarantee.
+  const src = { a: "", b: "Hello" };
+  const existing = { a: "", b: "Bonjour" };
+  assert.deepEqual(pendingStrings(src, existing, false), []);
+  const built = buildTarget(src, existing, (s) => `[${s}]`, false);
+  assert.equal(JSON.stringify(built), JSON.stringify({ a: "", b: "Bonjour" }));
+
+  // A genuinely untranslated empty target (no existing doc yet) still gets filled in.
+  assert.deepEqual(pendingStrings(src, undefined, false), ["", "Hello"]);
+  const first = buildTarget(src, undefined, (s) => `[${s}]`, false);
+  assert.equal(JSON.stringify(first), JSON.stringify({ a: "[]", b: "[Hello]" }));
+});
+
 test("lock: a source edit is detected as stale; a translator edit is flagged, not stale; per-locale, not shared", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-lock-"));
   const file = path.join(dir, "locale-ai.lock.json");
