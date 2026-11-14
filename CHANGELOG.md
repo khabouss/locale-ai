@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **README restructured as a landing page**: a quick start with a real before/after translation, a table of supported formats, a "Use in CI" GitHub Actions recipe, a flag table for `translate`, and one merged Languages section (quality tiers plus the benchmark table). The install warnings moved from the top into an "Installation notes" section.
+- Per-format details moved from the README into [docs/formats.md](docs/formats.md), and the lock-file behavior into a new [docs/incremental.md](docs/incremental.md).
+- Added format names (`gettext`, `xliff`, `xcstrings`, `android`, ...) to the npm `keywords`.
+
 ## 0.7.24
 
 External review round 8, 14 confirmed bugs across every format, verified against real tools wherever possible (Ruby/Psych, `xmllint`, `msgfmt`/`ngettext`, the `@formatjs` ICU parser) rather than just this project's own simulators ([khabouss/locale-ai#44](https://github.com/khabouss/locale-ai/issues/44), [khabouss/locale-ai#46](https://github.com/khabouss/locale-ai/issues/46)):
