@@ -10,6 +10,20 @@ import { MarianModel, type MarianPaths } from "./marian.ts";
 const FORMAT_VERSION = 2;
 const MANIFEST = "locale-ai.json";
 const HF = (process.env.HF_ENDPOINT ?? "https://huggingface.co").replace(/\/$/, "");
+/**
+ * Whether `HF` is the real huggingface.co, checked by its parsed hostname rather than
+ * `HF.includes("huggingface.co")` — a substring match a hostile `HF_ENDPOINT` can pass
+ * while still sending the token somewhere else entirely, e.g.
+ * `https://huggingface.co.attacker.example` (a subdomain of attacker.example) or
+ * `https://attacker.example/huggingface.co` (the text appears, but only in the path).
+ */
+const IS_HF_HOST = ((): boolean => {
+  try {
+    return new URL(HF).hostname === "huggingface.co";
+  } catch {
+    return false;
+  }
+})();
 
 const REQUIRED = ["config.json", "vocab.json", "source.spm"];
 const OPTIONAL = ["tokenizer_config.json", "generation_config.json", "target_vocab.json"];
@@ -109,7 +123,7 @@ export function localModelProblem(m: ModelEntry): string | undefined {
     : `no encoder/merged decoder ONNX files in ${m.path} (convert it with scripts/convert-marian.py)`;
 }
 
-interface RemoteFile {
+export interface RemoteFile {
   path: string;
   size: number;
   /** sha256 for LFS files. */
@@ -135,7 +149,7 @@ function requestHeaders(): Record<string, string> {
   // HF_TOKEN authenticates against huggingface.co's own API — never forward it to a
   // custom HF_ENDPOINT (a self-hosted mirror on a restricted network), which could be
   // any third party, not just the same trust boundary this token was issued for.
-  if (process.env.HF_TOKEN && HF.includes("huggingface.co")) headers.authorization = `Bearer ${process.env.HF_TOKEN}`;
+  if (process.env.HF_TOKEN && IS_HF_HOST) headers.authorization = `Bearer ${process.env.HF_TOKEN}`;
   return headers;
 }
 
@@ -173,7 +187,7 @@ async function fetchWithRetry(url: string, attempts = 3, signal?: AbortSignal): 
   // named — is the least useful part of it.
   const cause = last instanceof Error && last.cause instanceof Error ? last.cause : undefined;
   const detail = cause ? `${last instanceof Error ? last.message : ""}: ${cause.message}` : last instanceof Error ? last.message : String(last);
-  const mirrorHint = HF.includes("huggingface.co") ? ` If ${host} is blocked on this network, set HF_ENDPOINT to a mirror.` : "";
+  const mirrorHint = IS_HF_HOST ? ` If ${host} is blocked on this network, set HF_ENDPOINT to a mirror.` : "";
   throw new Error(`Download failed: could not reach ${host} (${detail}).${mirrorHint}`);
 }
 
@@ -230,7 +244,7 @@ async function matches(p: string, file: RemoteFile): Promise<boolean> {
 /** No bytes (connect included) for this long is treated as a dead connection, not a slow one. */
 const STALL_TIMEOUT_MS = 30_000;
 
-async function download(url: string, dest: string, file: RemoteFile, onBytes: (n: number) => void): Promise<void> {
+export async function download(url: string, dest: string, file: RemoteFile, onBytes: (n: number) => void): Promise<void> {
   const controller = new AbortController();
   let stallTimer: NodeJS.Timeout | undefined;
   const resetStallTimer = () => {
@@ -261,7 +275,23 @@ async function download(url: string, dest: string, file: RemoteFile, onBytes: (n
         hash.update(chunk);
         written += chunk.length;
         onBytes(chunk.length);
-        if (!out.write(chunk)) await new Promise((r) => out.once("drain", r));
+        // A stream that has errored (e.g. ENOSPC) never emits 'drain' afterward, so
+        // awaiting only 'drain' here hangs forever — with nothing else left running,
+        // Node then exits the whole process on its own, silently, with no error and
+        // exit code 0 (confirmed: writing to /dev/full this way never throws, logs,
+        // or returns; the process just ends). Waiting on 'error' too, and resolving
+        // either way, lets the `if (streamErr) throw` right after actually run.
+        if (!out.write(chunk)) {
+          await new Promise<void>((resolve) => {
+            const onSettled = () => {
+              out.off("drain", onSettled);
+              out.off("error", onSettled);
+              resolve();
+            };
+            out.once("drain", onSettled);
+            out.once("error", onSettled);
+          });
+        }
         if (streamErr) throw streamErr;
       }
     } finally {

@@ -1,7 +1,13 @@
 import { CATEGORIES, finalNewline, isObj, type LocaleDoc, newObj, type Obj, withNewline } from "./shared.ts";
 import { XML_TAG_RE } from "./xml.ts";
 
-/** Android's `&entity;` plus its own backslash escapes (`\'`, `\"`, `\n`, `\t`) and `<![CDATA[...]]>`. */
+/**
+ * Android's `&entity;` plus its own backslash escapes (`\'`, `\"`, `\n`, `\t`, `\@`,
+ * `\?`, `\uXXXX`) and `<![CDATA[...]]>`. `\uXXXX` is decoded to the real character
+ * first — a generic "drop the backslash, keep the next char" pass would otherwise
+ * turn `Loading…` into the literal text `Loadingu2026`, backslash and all gone,
+ * rather than "Loading…".
+ */
 function unescapeAndroidXml(s: string): string {
   return s
     .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, (_m, inner: string) => inner)
@@ -10,6 +16,7 @@ function unescapeAndroidXml(s: string): string {
     .replace(/&quot;/g, '"')
     .replace(/&apos;/g, "'")
     .replace(/&amp;/g, "&")
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_m, hex: string) => String.fromCharCode(parseInt(hex, 16)))
     .replace(/\\(.)/g, (_m, c: string) => ({ n: "\n", t: "\t" })[c] ?? c);
 }
 function escapeAndroidXml(s: string): string {
@@ -29,9 +36,16 @@ function escapeAndroidXml(s: string): string {
  * widely-used `<xliff:g id="time">%1$s</xliff:g>` placeholder-wrapper tag, same shape
  * as any other tag placeholders.ts protects) survives a write as actual XML instead
  * of coming out HTML-escaped and visible as literal text on screen.
+ *
+ * A value that starts with a literal `@` or `?` must be re-escaped there (`\@`/`\?`),
+ * never written out plain — aapt2 parses an unescaped leading `@`/`?` as a resource or
+ * style reference and fails the build, even though it round-trips fine as plain text
+ * through everything else in this module.
  */
 function escapeAndroidXmlKeepTags(s: string): string {
-  let out = "";
+  const lead = s[0] === "@" || s[0] === "?" ? `\\${s[0]}` : "";
+  s = lead ? s.slice(1) : s;
+  let out = lead;
   let last = 0;
   for (const m of s.matchAll(XML_TAG_RE)) {
     out += escapeAndroidXml(s.slice(last, m.index)) + m[0];

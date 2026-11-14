@@ -1,14 +1,34 @@
 import { isObj, type LocaleDoc, newObj, type Obj } from "./shared.ts";
 
+/**
+ * True for a value with a `{0}`-style numbered placeholder — the one reliable sign
+ * that whatever loads this key also runs it through `java.text.MessageFormat`:
+ * plain `ResourceBundle.getString()` does no substitution at all, so a bare `{0}`
+ * with nothing to interpolate it would otherwise just show up literally.
+ */
+const MESSAGE_FORMAT_PLACEHOLDER = /\{\d+\}/;
+
 /** Java `.properties`: `\n`, `\t`, `\r`, `\f`, `\\` and `\uXXXX` escapes, plus an escaped separator/leading-space. */
 function unescapeProperties(s: string): string {
-  return s.replace(/\\(u[0-9a-fA-F]{4}|.)/gs, (_m, esc: string) => {
+  const out = s.replace(/\\(u[0-9a-fA-F]{4}|.)/gs, (_m, esc: string) => {
     if (esc[0] === "u" && esc.length === 5) return String.fromCharCode(parseInt(esc.slice(1), 16));
     return ({ n: "\n", t: "\t", r: "\r", f: "\f" } as Record<string, string>)[esc] ?? esc;
   });
+  // MessageFormat's own `''` → `'` unescaping (see escapeProperties) — a separate,
+  // upstream layer from .properties' own backslash escapes above, so undone here as
+  // its own pass rather than folded into the replace above.
+  return MESSAGE_FORMAT_PLACEHOLDER.test(out) ? out.replace(/''/g, "'") : out;
 }
 function escapeProperties(s: string): string {
-  let out = s.replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/\t/g, "\\t").replace(/\r/g, "\\r");
+  // MessageFormat treats a bare `'` as the start of a quoted (literal-braces) run
+  // wherever `{N}` syntax appears in the same pattern, so "don't" next to "{0}"
+  // either eats the placeholder or corrupts the text depending on where the next
+  // `'` falls; `''` is MessageFormat's own documented escape for one literal `'`.
+  // Skipped for a value with no `{N}` at all — nothing here can tell whether THAT
+  // string is also fed through MessageFormat, so doubling its apostrophes would be
+  // as likely to put a visible `''` in front of someone as to fix anything.
+  let out = MESSAGE_FORMAT_PLACEHOLDER.test(s) ? s.replace(/'/g, "''") : s;
+  out = out.replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/\t/g, "\\t").replace(/\r/g, "\\r");
   if (out[0] === " ") out = `\\${out}`;
   return out;
 }

@@ -361,7 +361,15 @@ async function fixSingularGrammar(
   const jobs: Array<{ source: string; pinned: string; prepared: string; marker: string }> = [];
   for (const s of singularHints) {
     if (!remaining.has(s) || translations.get(s) === undefined) continue;
-    const tokens = mask(s, "natural").tokens;
+    // Masking (with `opts.protect`) is used only to decide eligibility here: if a
+    // doNotTranslate match is present alongside the count placeholder, `tokens`
+    // has more than one entry and this retry is skipped, same as any other
+    // string too complex for this narrow single-placeholder rewrite. Once eligible,
+    // the count placeholder IS the only masked span, so building `pinned` from the
+    // original `s` (never from `masked.text`, whose span is already a generic
+    // `{0}`-style marker, not the `{{count}}` text `COUNT_PLACEHOLDER` matches) is
+    // already safe — there is nothing else in `s` to leak.
+    const tokens = mask(s, "natural", opts.protect).tokens;
     if (tokens.length !== 1 || !COUNT_PLACEHOLDER.test(tokens[0])) continue;
     const m = COUNT_PLACEHOLDER.exec(s)!;
     const pinned = s.slice(0, m.index) + "1" + s.slice(m.index + m[0].length);
@@ -401,9 +409,15 @@ async function fixIcuOneUnits(
   for (const p of plans) {
     for (const i of p.oneUnitIndexes) {
       const unit = p.units[i];
-      const tokens = mask(unit.text, "natural").tokens;
+      // Same reasoning as `fixSingularGrammar`, above: `opts.protect`-aware masking is
+      // used only for the eligibility check (a doNotTranslate match present alongside
+      // `{__HASH__}` disqualifies this retry), not to build `pinned` — `unit.text` still
+      // has the literal `{__HASH__}` text, unlike `masked.text`, whose span is already
+      // a generic marker that `HASH_PLACEHOLDER.replace` can never find.
+      const tokens = mask(unit.text, "natural", opts.protect).tokens;
       if (tokens.length !== 1 || tokens[0] !== HASH_PLACEHOLDER) continue; // anything else needs the normal masking pipeline to survive
-      jobs.push({ unit, pinned: unit.text.replace(HASH_PLACEHOLDER, "1"), prepared: prepare(unit.text.replace(HASH_PLACEHOLDER, "1")) });
+      const pinned = unit.text.replace(HASH_PLACEHOLDER, "1");
+      jobs.push({ unit, pinned, prepared: prepare(pinned) });
     }
   }
   if (!jobs.length) return;
