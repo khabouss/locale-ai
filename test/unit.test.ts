@@ -50,6 +50,12 @@ test("mask protects common placeholder syntaxes", () => {
     // need this: the content between their braces is already protected on its own by
     // the ICU-args pattern above.
     ["Use '{' to open a block in {0}", ["'{'", "{0}"]],
+    // A curly quote (“ ” ‘ ’) directly touching a placeholder — the Italian and
+    // German models garble this exact boundary on a real hop even though they
+    // handle the quote character fine elsewhere ("{0}" -> "[55]{0} [56]"). Masked
+    // together with the placeholder so the model never sees the raw boundary.
+    ["The file “{0}” was deleted.", ["“{0}”"]],
+    ["The file ‘{name}’ was deleted.", ["‘{name}’"]],
   ];
   for (const [input, expected] of cases) {
     assert.deepEqual(mask(input).tokens, expected, input);
