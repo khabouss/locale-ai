@@ -1363,6 +1363,41 @@ test("Java .properties: a typed MessageFormat argument ({0,number,integer}) stil
   assert.equal((reread.data as Record<string, string>).literal, "Type '{0}' literally");
 });
 
+test("Java .properties: two unrelated elisions in the same value are both doubled, not left alone just because they pair up", () => {
+  // 0.7.19 judged a value's quotes "intentional" whenever they came out balanced
+  // overall (an even count of unpaired `'`s) — but two ordinary French/Italian
+  // elisions pair up by coincidence just as often as a genuine `'{0}'` idiom does.
+  // "L'utilisateur n'a pas accès à {0}." has two such elisions and no intentional
+  // quoting at all; written with only one of them (or neither) doubled, MessageFormat
+  // reads the first `'` as opening a literal-quoted run that swallows everything up
+  // to the next `'`, dropping "utilisateur n" from view and only coincidentally still
+  // substituting {0} because it happens to fall outside that run. The fix only treats
+  // the two quotes directly wrapping a placeholder (`'{0}'`) as intentional; every
+  // other apostrophe is doubled regardless of how many others are in the string —
+  // including one that merely sits next to an unrelated brace without a matching
+  // closing quote, as in "L'{0} n'existe pas" (elision right before the placeholder,
+  // not the literal-braces idiom, since there's no `'` right after the `}`).
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-properties-elisions-"));
+  const file = path.join(root, "en.properties");
+  fs.writeFileSync(file, "denied=User {0} denied access\nmissing=The {0} does not exist\n");
+  const doc = readLocaleDoc(file, "en", true);
+
+  const out = doc.serialize(
+    { denied: "L'utilisateur n'a pas accès à {0}.", missing: "L'{0} n'existe pas" },
+    "fr",
+  );
+  assert.equal(
+    out,
+    "denied=L''utilisateur n''a pas accès à {0}.\nmissing=L''{0} n''existe pas\n",
+  );
+
+  // Round-trips back to the original single-apostrophe form.
+  fs.writeFileSync(path.join(root, "fr.properties"), out);
+  const reread = readLocaleDoc(path.join(root, "fr.properties"), "fr", true);
+  assert.equal((reread.data as Record<string, string>).denied, "L'utilisateur n'a pas accès à {0}.");
+  assert.equal((reread.data as Record<string, string>).missing, "L'{0} n'existe pas");
+});
+
 test("XLIFF 1.2: detection via --input (untagged source), target filename convention, source-language mismatch is rejected", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-xliff-"));
   const file = path.join(root, "messages.xlf");

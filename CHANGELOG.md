@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.20
+
+Fixes a regression from 0.7.19's intentional-quoting fix, caught by re-testing that release against a real model run ([khabouss/locale-ai#35](https://github.com/khabouss/locale-ai/issues/35)):
+
+- **Java `.properties`: two unrelated elisions in the same value were no longer escaped** — 0.7.19 judged a value's apostrophes "intentional `'{0}'`-style quoting" (and left them single) whenever they came out balanced overall — an even number of unpaired `'`s. But ordinary French/Italian text with two elisions, like `L'utilisateur n'a pas accès à {0}.`, pairs up by coincidence just as often as one genuine `'{0}'` idiom does; written with neither apostrophe doubled, `MessageFormat` reads the first `'` as opening a literal-quoted run that swallows "utilisateur n" from view. Apostrophes are now doubled individually, except for the exact two quotes directly wrapping a placeholder's braces (`'{0}'`, `'{0,number,integer}'`) — every other apostrophe is escaped regardless of how many others are in the string, including a lone one that merely sits next to an unrelated brace without a matching closing quote (elision right before a placeholder, as in `L'{0} n'existe pas`).
+
 ## 0.7.19
 
 Another external review, 4 confirmed bugs, verified with fresh reproductions against the real source before fixing ([khabouss/locale-ai#33](https://github.com/khabouss/locale-ai/issues/33)):
