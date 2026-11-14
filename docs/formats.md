@@ -1,6 +1,18 @@
 # Format notes
 
-Per-format details on round-trip fidelity and edge cases — what survives a rerun, what gets regenerated, and conventions specific to each format. For the list of supported layouts and a general overview, see the [README](../README.md#what-it-handles).
+Per-format details: how files are found, what survives a rerun, what gets regenerated, and conventions specific to each format. For the overview, see the [README](../README.md#what-it-handles).
+
+**In place vs. regenerated**: most formats edit an existing target file in place on a rerun, so comments and hand edits to untouched entries survive. Android, ARB, `.xcstrings` and `.resx` regenerate each entry from the source's own structure instead, and XLIFF does a bit of both (only `<target>` is ever replaced).
+
+## Layouts and detection
+
+- `locales/en/*.json` (nested folders too) → `locales/fr/...`, or `messages/en.json` → `messages/fr.json`. Formats can be mixed freely in the same project.
+- Common folders are found automatically: `locales`, `src/locales`, `public/locales`, `src/i18n`, `messages`, `lang`, `config/locales` (Rails), ... Otherwise pass `--input`.
+- Framework naming conventions are recognized on both the source and the generated target side:
+  - `flutter gen-l10n`'s `app_en.arb` / `app_fr.arb` filename prefix;
+  - Apple's `en.lproj` / `fr.lproj` directory suffix (`--input en.lproj` or just the project root both work);
+  - Java `ResourceBundle`'s `messages_en.properties` / `messages_fr.properties` prefix. Regions use an underscore (`messages_pt_BR.properties`), Java's own convention, rather than the BCP-47 hyphen used everywhere else.
+- `.xcstrings`, `.xlf`/`.xliff` and `.resx` are **not** auto-detected: point `--input` straight at the file.
 
 ## YAML (`.yaml`/`.yml`)
 
@@ -24,11 +36,17 @@ A file saved as UTF-16 (Xcode's traditional default) is read like a UTF-8 one, a
 
 ## Android `strings.xml`
 
+`res/values/strings.xml` → `res/values-fr/strings.xml` (or `values-pt-rBR` for a region). `<string>`, `<string-array>` and `<plurals>` are all translated. Resource-qualifier scripts/variants (`values-b+sr+Latn`) aren't supported — only a plain language or language-region qualifier.
+
 `translatable="false"` strings and each element's own `<!-- ... -->` comment are kept on first write, but — unlike YAML/`.po`/`.strings` — a rerun regenerates the file from scratch rather than editing an existing target in place, so a hand-edited comment in an already-translated file won't survive a rerun.
 
 A value that's purely a reference to another resource (`@string/app_name`) is never translated, regardless of its own `translatable` attribute. Inline markup inside a value — most commonly `<xliff:g id="...">...</xliff:g>`, Android's own placeholder-wrapper tag — comes out as real, untouched XML rather than visible escaped text. A value entirely wrapped in a literal `"..."` pair (Android's own convention for preserving leading/trailing whitespace) keeps those quotes, and that whitespace, on write.
 
 ## Apple `.xcstrings`
+
+Xcode 15+'s String Catalog. Every locale lives inside this one file, so point `--input` straight at it (`--input Localizable.xcstrings`); it isn't auto-detected, since a project can have several.
+
+`shouldTranslate: false` entries, Xcode's per-device variants (`variations.iphone`/`.ipad`) and multi-variable strings (`substitutions`) are left untouched rather than mistranslated — only a single cardinal plural (`variations.plural`) is supported. A key with no explicit source-language text falls back to the key itself, matching Xcode's own convention.
 
 Every target locale is written into the same one catalog file (each locale's run re-reads it first, so several locales share it safely in one invocation); an entry's `state` (e.g. a translator's `needs_review` flag) is only touched when the value it's attached to actually changes, so hand review survives a rerun.
 
@@ -40,12 +58,20 @@ A key whose source value uses `\uXXXX` escapes (rather than literal UTF-8) keeps
 
 ## XLIFF 1.2 (`.xlf`/`.xliff`)
 
+Used by Qt Linguist, Angular's `ng extract-i18n`, and most CAT tools. Only via `--input <file>.xlf`: the source file's name carries no locale tag (XLIFF puts it in `source-language`), and targets are written as `<basename>.fr.xlf`.
+
+Inline markup inside a `<source>` — Angular's `<x id="INTERPOLATION" .../>`, or a generic `<g id="1">...</g>` — passes through untouched. `translate="no"` units, and the rarer non-nesting `<bpt>`/`<ept>` paired-tag markup, are left completely alone.
+
 Unlike Android/ARB/`.xcstrings` (which regenerate the whole entry from the source every run), only the `<target>` element itself is ever replaced — every other child a `<trans-unit>` can have (`<note>`, `<context-group>` recording where the string is used in the app's own source, `<alt-trans>`, ...) rides through completely untouched, in its original position. A translator's own `<target state="...">` attribute is the one exception: a fresh `<target>` (no attributes) replaces it wholesale on a rerun, the same documented tradeoff Android already makes for comments on an already-translated string. `<file target-language="...">` is set to the target locale on output.
 
 ## .NET `.resx`
 
-Gets the same regenerate-from-source treatment as XLIFF/Android/ARB/`.xcstrings`.
+`--input Resources.resx` (the untagged default/neutral resource file) → `Resources.fr.resx`, the same `<basename>.<culture>.resx` convention as XLIFF. `<resheader>` boilerplate is left exactly as-is; a non-string resource (an icon, image or other base64 blob — any `<data>` with a `type`/`mimetype` attribute) is never touched; an optional `<comment>` is kept from the source. Unlike the other XML formats, there's no locale metadata inside the file to cross-check `--from` against.
+
+Gets the same regenerate-from-source treatment as Android/ARB/`.xcstrings`.
 
 ## JS/TS locale modules
+
+`en.js`, `en.mjs`, `en.cjs`, `en.ts`. Deliberately narrow, and **no code is ever executed**: only `export default {...}`, `module.exports = {...}` or `exports.default = {...}` whose value is a plain object literal is read — strings, numbers, booleans, null, nested objects/arrays; bare or quoted keys; `//`/`/* */` comments; trailing commas. A function, template-literal interpolation, import, computed key, or a reference to a separately declared constant (`const en = {...}; export default en;`) fails with a clear parse error instead of being silently misread. The file's original quote style (`'` vs `"`) and indentation are matched on output.
 
 The exported object is regenerated from the source's own key order on every run (with each key's own preceding `//`/`/* */` comment, if any, kept) rather than edited in place; everything outside the object itself — imports, other top-level code, a trailing `as const`/`satisfies ...` — is passed through completely unchanged.
