@@ -56,6 +56,12 @@ test("mask protects common placeholder syntaxes", () => {
     // together with the placeholder so the model never sees the raw boundary.
     ["The file “{0}” was deleted.", ["“{0}”"]],
     ["The file ‘{name}’ was deleted.", ["‘{name}’"]],
+    // Only a genuine MATCHED pair is absorbed — a curly quote on just one side
+    // (an unrelated trailing possessive, a mismatched-style pair) is never swallowed
+    // into the same span as the placeholder: doing so used to prevent the model from
+    // restructuring the sentence the way the target language needs.
+    ["{name}’s profile was updated.", ["{name}"]],
+    ["“{0}' trailing", ["{0}"]],
   ];
   for (const [input, expected] of cases) {
     assert.deepEqual(mask(input).tokens, expected, input);

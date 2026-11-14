@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.23
+
+Fixes two regressions from 0.7.22's curly-quote fix, caught by re-testing that release against real fr/de/it/es model runs and real `java.text.MessageFormat` via Docker ([khabouss/locale-ai#42](https://github.com/khabouss/locale-ai/issues/42)):
+
+- **Possessives got a stray apostrophe** — the fix absorbed a curly quote on either side of a placeholder independently, so an unrelated trailing possessive (`{name}'s profile`) was swallowed into the same masked span as the placeholder. The exact text still restored verbatim, but the model could no longer see the `'s` as ordinary attachable text and lost the ability to restructure the sentence the way the target language needs (`Le profil {name}'s a été mis à jour.` instead of `Le profil de {name} a été mis à jour.`). A curly quote is now only absorbed when it forms a genuine matched pair of the same style directly wrapping the placeholder (`"{0}"` or `'{0}'`) — never a lone quote on just one side.
+- **`check` failed correct translations** — because a matched curly-quote pair is now part of the placeholder's token text, a hand-edited translation using the target language's own quoting convention (German `„…“`, French `« … »`) or a rephrased possessive no longer counted as having the same placeholders as the source, so `check` reported `placeholder-mismatch` and exited 1 for valid translations. `check`'s placeholder comparison now ignores quote characters entirely when comparing source and target placeholder sets.
+
 ## 0.7.22
 
 Fixes a third regression from 0.7.20, plus two related translation-safety gaps — one of them re-confirmed against real `java.text.MessageFormat`, not just a simulator — caught by re-testing 0.7.21 against real fr/de/it model runs ([khabouss/locale-ai#39](https://github.com/khabouss/locale-ai/issues/39), [khabouss/locale-ai#41](https://github.com/khabouss/locale-ai/issues/41)):
