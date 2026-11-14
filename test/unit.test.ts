@@ -19,6 +19,7 @@ import {
   existingTargets,
   flattenStrings,
   keyPathProtect,
+  pendingEntries,
   pendingStrings,
   pluralOneStrings,
   readLocaleDoc,
@@ -958,6 +959,27 @@ test("flattenStrings: key paths for nested objects and arrays", () => {
     { path: "d[1]", value: "q" },
   ]);
   assert.deepEqual(flattenStrings("just a string"), [{ path: "(root)", value: "just a string" }]);
+});
+
+test("flattenStrings/pendingEntries: a flat key containing a literal dot never collides with a same-shaped nested path", () => {
+  // Without escaping, a flat key "a.b" and a nested a -> b both flatten to the exact
+  // same path string "a.b" — the lock file (keyed by this string) can't tell them
+  // apart, so whichever is recorded last overwrites the other's entry, leaving it
+  // permanently "stale" and re-translated every run, and `check` reporting it as such.
+  const data = { "a.b": "literal dotted key", a: { b: "nested value" } };
+  const flat = flattenStrings(data);
+  const paths = flat.map((e) => e.path);
+  assert.equal(new Set(paths).size, paths.length, "every path must be unique");
+  assert.deepEqual(flat, [
+    { path: "a\\.b", value: "literal dotted key" },
+    { path: "a.b", value: "nested value" },
+  ]);
+
+  const pending = pendingEntries(data, {}, false);
+  assert.deepEqual(
+    pending.map((e) => e.path),
+    ["a\\.b", "a.b"],
+  );
 });
 
 test("existingTargets: finds already-translated locales, dir and file layout", () => {

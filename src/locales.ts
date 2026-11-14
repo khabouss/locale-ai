@@ -396,6 +396,20 @@ export function readLocaleDoc(file: string, tag: string, isSource = false, fuzzy
 const needsTranslation = (existing: unknown, source: string, overwrite: boolean) =>
   overwrite || typeof existing !== "string" || (existing === "" && source !== "");
 
+/**
+ * Joins `key` onto a dotted path (the convention every key path in this file uses,
+ * for the lock file, `check`, and `doNotTranslateKeys`), escaping a literal `.`
+ * within the key itself first — rare, but legal in JSON/YAML/`.properties`. Without
+ * this, a flat key `"a.b"` and a nested `"a": {"b": ...}` produce the exact same
+ * path string `"a.b"`, and the lock file (keyed by this string) can't tell them
+ * apart: whichever is recorded last overwrites the other's entry, leaving it
+ * permanently "stale" and re-translated every run.
+ */
+function joinPath(path: string, key: string): string {
+  const escaped = key.replace(/\\/g, "\\\\").replace(/\./g, "\\.");
+  return path ? `${path}.${escaped}` : escaped;
+}
+
 /** Flattens a locale tree into key-path -> string-value pairs (for `locale-ai check`). */
 export function flattenStrings(
   data: unknown,
@@ -404,7 +418,7 @@ export function flattenStrings(
 ): Array<{ path: string; value: string }> {
   if (typeof data === "string") out.push({ path: prefix || "(root)", value: data });
   else if (Array.isArray(data)) data.forEach((v, i) => flattenStrings(v, `${prefix}[${i}]`, out));
-  else if (isObj(data)) for (const k of Object.keys(data)) flattenStrings(data[k], prefix ? `${prefix}.${k}` : k, out);
+  else if (isObj(data)) for (const k of Object.keys(data)) flattenStrings(data[k], joinPath(prefix, k), out);
   return out;
 }
 
@@ -452,7 +466,7 @@ export function pendingEntries(
     } else if (Array.isArray(s)) {
       s.forEach((v, i) => visit(v, Array.isArray(e) ? e[i] : undefined, `${path}[${i}]`));
     } else if (isObj(s)) {
-      for (const k of Object.keys(s)) visit(s[k], isObj(e) ? e[k] : undefined, path ? `${path}.${k}` : k);
+      for (const k of Object.keys(s)) visit(s[k], isObj(e) ? e[k] : undefined, joinPath(path, k));
     }
   };
   visit(source, existing, "");
@@ -495,7 +509,7 @@ export function buildTarget(
     if (Array.isArray(s)) return s.map((v, i) => visit(v, Array.isArray(e) ? e[i] : undefined, `${path}[${i}]`));
     if (isObj(s)) {
       const out = newObj();
-      for (const k of Object.keys(s)) out[k] = visit(s[k], isObj(e) ? e[k] : undefined, path ? `${path}.${k}` : k);
+      for (const k of Object.keys(s)) out[k] = visit(s[k], isObj(e) ? e[k] : undefined, joinPath(path, k));
       if (isObj(e)) for (const k of Object.keys(e)) if (!(k in out)) out[k] = e[k];
       return out;
     }
@@ -619,7 +633,7 @@ export function addPluralForms(doc: unknown, targetLang: string, opts: PluralSyn
     for (const k of keys) {
       const id = groupOf.get(k);
       if (id === undefined) {
-        out[k] = visit(v[k], path ? `${path}.${k}` : k);
+        out[k] = visit(v[k], joinPath(path, k));
         continue;
       }
       if (emitted.has(id)) continue;
@@ -627,13 +641,13 @@ export function addPluralForms(doc: unknown, targetLang: string, opts: PluralSyn
       const g = groups.get(id)!;
       const otherKey = g.cats.get("other")!;
       const other = v[otherKey] as string;
-      const otherPath = path ? `${path}.${otherKey}` : otherKey;
+      const otherPath = joinPath(path, otherKey);
       const refresh = opts.otherStale?.(otherPath) ?? false;
       for (const cat of CATEGORIES) {
         const existing = g.cats.get(cat);
         if (existing) {
           out[existing] = v[existing];
-          const existingPath = path ? `${path}.${existing}` : existing;
+          const existingPath = joinPath(path, existing);
           if (cat === "other" || opts.hasSource?.(existingPath)) continue;
           const current = v[existing] as string;
           if (opts.isEdited?.(existingPath, current)) {
@@ -647,7 +661,7 @@ export function addPluralForms(doc: unknown, targetLang: string, opts: PluralSyn
           const newKey = `${id}_${cat}`;
           out[newKey] = other;
           added++;
-          derived.push({ path: path ? `${path}.${newKey}` : newKey, value: other });
+          derived.push({ path: joinPath(path, newKey), value: other });
         }
       }
     }
@@ -677,7 +691,7 @@ export function addNestedPluralForms(doc: unknown, targetLang: string, opts: Plu
       keys.length >= 2 && keys.includes("other") && keys.every((k) => CATEGORIES.includes(k) && typeof v[k] === "string");
     if (!isGroup) {
       const out = newObj();
-      for (const k of keys) out[k] = visit(v[k], path ? `${path}.${k}` : k);
+      for (const k of keys) out[k] = visit(v[k], joinPath(path, k));
       return out;
     }
     let needed: string[];
@@ -687,13 +701,13 @@ export function addNestedPluralForms(doc: unknown, targetLang: string, opts: Plu
       needed = keys;
     }
     const other = v.other as string;
-    const otherPath = path ? `${path}.other` : "other";
+    const otherPath = joinPath(path, "other");
     const refresh = opts.otherStale?.(otherPath) ?? false;
     const out = newObj();
     for (const cat of CATEGORIES) {
       if (keys.includes(cat)) {
         out[cat] = v[cat];
-        const catPath = path ? `${path}.${cat}` : cat;
+        const catPath = joinPath(path, cat);
         if (cat === "other" || opts.hasSource?.(catPath)) continue;
         const current = v[cat] as string;
         if (opts.isEdited?.(catPath, current)) {
@@ -706,7 +720,7 @@ export function addNestedPluralForms(doc: unknown, targetLang: string, opts: Plu
       } else if (needed.includes(cat)) {
         out[cat] = other;
         added++;
-        derived.push({ path: path ? `${path}.${cat}` : cat, value: other });
+        derived.push({ path: joinPath(path, cat), value: other });
       }
     }
     return out;
