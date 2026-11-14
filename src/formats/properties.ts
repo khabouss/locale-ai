@@ -12,26 +12,17 @@ import { isObj, type LocaleDoc, newObj, type Obj } from "./shared.ts";
 const MESSAGE_FORMAT_PLACEHOLDER = /\{\d+(,[^{}]+)?\}/;
 
 /**
- * True when `s`'s un-doubled single quotes, read left to right per MessageFormat's own
- * quoting rule (an unpaired `'` toggles "inside a quoted literal run"; `''` is always
- * one literal apostrophe and never toggles), end up balanced — i.e. every quote that
- * opens a literal run also closes one, such as the deliberate `'{0}'` idiom for
- * showing a placeholder's own braces literally. An odd, unbalanced `'` (as in
- * "don't") is what genuinely needs the `''` escape; a balanced pair is almost always
- * intentional quoting and should be left exactly as written.
+ * Matches the exact `'{0}'`/`'{0,number,integer}'` idiom — a quote directly before a
+ * placeholder's opening brace and another directly after its closing brace — which is
+ * MessageFormat's own documented way to show a placeholder's braces literally (no
+ * substitution). Only *these two specific quote characters* are left alone on write;
+ * every other apostrophe, including a lone one that merely happens to sit next to an
+ * unrelated brace (French elision right before a placeholder, as in `"L'{0} n'existe
+ * pas"`), still needs the `''` escape. Counting the string's apostrophes and checking
+ * whether they're even (the previous approach) doesn't work: two unrelated elisions
+ * pair up by coincidence just as often as one genuine `'{0}'` idiom does.
  */
-function hasBalancedQuoting(s: string): boolean {
-  let inQuote = false;
-  for (let i = 0; i < s.length; i++) {
-    if (s[i] !== "'") continue;
-    if (s[i + 1] === "'") {
-      i++;
-      continue;
-    }
-    inQuote = !inQuote;
-  }
-  return !inQuote;
-}
+const LITERAL_BRACE_QUOTE_RE = /'(\{\d+(?:,[^{}]+)?\})'/g;
 
 /** Java `.properties`: `\n`, `\t`, `\r`, `\f`, `\\` and `\uXXXX` escapes, plus an escaped separator/leading-space. */
 function unescapeProperties(s: string): string {
@@ -43,9 +34,9 @@ function unescapeProperties(s: string): string {
   // upstream layer from .properties' own backslash escapes above, so undone here as
   // its own pass rather than folded into the replace above. Unconditional: a `''`
   // pair is always one literal apostrophe per MessageFormat's own rule, and
-  // escapeProperties never introduces one for an already-balanced (intentionally
-  // quoted) value in the first place — so there's nothing here that could wrongly
-  // undo a deliberate `'{0}'`-style literal-braces idiom, which never gets doubled.
+  // escapeProperties never doubles the two quotes forming an intentional `'{0}'`-style
+  // literal-braces idiom in the first place — so there's nothing here that could
+  // wrongly undo one.
   return MESSAGE_FORMAT_PLACEHOLDER.test(out) ? out.replace(/''/g, "'") : out;
 }
 function escapeProperties(s: string): string {
@@ -53,13 +44,21 @@ function escapeProperties(s: string): string {
   // wherever `{N}` syntax appears in the same pattern, so "don't" next to "{0}"
   // either eats the placeholder or corrupts the text depending on where the next
   // `'` falls; `''` is MessageFormat's own documented escape for one literal `'`.
-  // Only an UNBALANCED quote (an odd one out, like "don't") gets this treatment —
-  // a string whose quotes are already balanced (e.g. "Type '{0}' literally", using
-  // the quote pair deliberately to show "{0}" as literal text rather than a
-  // placeholder) is left exactly as written: doubling those quotes would turn the
-  // intentional literal-braces idiom into live substitution instead, the opposite of
-  // what it's there for.
-  let out = MESSAGE_FORMAT_PLACEHOLDER.test(s) && s.includes("'") && !hasBalancedQuoting(s) ? s.replace(/'/g, "''") : s;
+  // Every apostrophe gets doubled EXCEPT the two forming a genuine `'{0}'`-literal
+  // idiom (see LITERAL_BRACE_QUOTE_RE) — doubling those would turn the intentional
+  // literal-braces idiom into live substitution instead, the opposite of what it's
+  // there for.
+  let out = s;
+  if (MESSAGE_FORMAT_PLACEHOLDER.test(s) && s.includes("'")) {
+    const kept = new Set<number>();
+    LITERAL_BRACE_QUOTE_RE.lastIndex = 0;
+    for (let m = LITERAL_BRACE_QUOTE_RE.exec(s); m; m = LITERAL_BRACE_QUOTE_RE.exec(s)) {
+      kept.add(m.index);
+      kept.add(m.index + m[0].length - 1);
+    }
+    out = "";
+    for (let i = 0; i < s.length; i++) out += s[i] === "'" && !kept.has(i) ? "''" : s[i];
+  }
   out = out.replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/\t/g, "\\t").replace(/\r/g, "\\r");
   if (out[0] === " ") out = `\\${out}`;
   return out;
