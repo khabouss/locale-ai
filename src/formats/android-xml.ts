@@ -2,11 +2,16 @@ import { CATEGORIES, finalNewline, isObj, type LocaleDoc, newObj, type Obj, with
 import { XML_TAG_RE } from "./xml.ts";
 
 /**
- * Android's `&entity;` plus its own backslash escapes (`\'`, `\"`, `\n`, `\t`, `\@`,
- * `\?`, `\uXXXX`) and `<![CDATA[...]]>`. `\uXXXX` is decoded to the real character
- * first — a generic "drop the backslash, keep the next char" pass would otherwise
- * turn `Loading…` into the literal text `Loadingu2026`, backslash and all gone,
- * rather than "Loading…".
+ * Android's `&entity;` plus its own backslash escapes (`\\`, `\'`, `\"`, `\n`, `\t`,
+ * `\@`, `\?`, `\uXXXX`) and `<![CDATA[...]]>`. All the backslash escapes are decoded
+ * in a single pass, with `\\` (one literal backslash) and `\uXXXX` as their own
+ * alternatives tried before the generic one-char fallback — run as separate sequential
+ * passes instead, `\uXXXX`'s own regex can't tell a real `\uXXXX` escape from an
+ * escaped backslash immediately followed by the literal text `uXXXX` (`\\u0041`,
+ * meaning a backslash then "u0041"): it would match starting at the SECOND backslash
+ * and wrongly decode that as U+0041 ("A"), leaving the first backslash to then be
+ * eaten by the generic fallback. One combined pass never lets that happen, since the
+ * two real backslash characters are consumed together as soon as they're seen.
  */
 function unescapeAndroidXml(s: string): string {
   return s
@@ -16,11 +21,15 @@ function unescapeAndroidXml(s: string): string {
     .replace(/&quot;/g, '"')
     .replace(/&apos;/g, "'")
     .replace(/&amp;/g, "&")
-    .replace(/\\u([0-9a-fA-F]{4})/g, (_m, hex: string) => String.fromCharCode(parseInt(hex, 16)))
-    .replace(/\\(.)/g, (_m, c: string) => ({ n: "\n", t: "\t" })[c] ?? c);
+    .replace(/\\\\|\\u[0-9a-fA-F]{4}|\\(.)/g, (m: string, c: string | undefined) => {
+      if (m === "\\\\") return "\\";
+      if (m[1] === "u") return String.fromCharCode(parseInt(m.slice(2), 16));
+      return ({ n: "\n", t: "\t" } as Record<string, string>)[c ?? ""] ?? (c ?? "");
+    });
 }
 function escapeAndroidXml(s: string): string {
   return s
+    .replace(/\\/g, "\\\\")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")

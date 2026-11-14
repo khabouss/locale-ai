@@ -1,12 +1,37 @@
 import { isObj, type LocaleDoc, newObj, type Obj } from "./shared.ts";
 
 /**
- * True for a value with a `{0}`-style numbered placeholder — the one reliable sign
- * that whatever loads this key also runs it through `java.text.MessageFormat`:
+ * True for a value with a `{0}`-style MessageFormat placeholder — the one reliable
+ * sign that whatever loads this key also runs it through `java.text.MessageFormat`:
  * plain `ResourceBundle.getString()` does no substitution at all, so a bare `{0}`
- * with nothing to interpolate it would otherwise just show up literally.
+ * with nothing to interpolate it would otherwise just show up literally. Also matches
+ * the extended `{0,number,integer}`/`{0,date}`/`{0,date,short}` forms — an
+ * ArgumentIndex followed by an optional `,FormatType[,FormatStyle]` — not just a bare
+ * `{0}`, since those still mean MessageFormat is in play.
  */
-const MESSAGE_FORMAT_PLACEHOLDER = /\{\d+\}/;
+const MESSAGE_FORMAT_PLACEHOLDER = /\{\d+(,[^{}]+)?\}/;
+
+/**
+ * True when `s`'s un-doubled single quotes, read left to right per MessageFormat's own
+ * quoting rule (an unpaired `'` toggles "inside a quoted literal run"; `''` is always
+ * one literal apostrophe and never toggles), end up balanced — i.e. every quote that
+ * opens a literal run also closes one, such as the deliberate `'{0}'` idiom for
+ * showing a placeholder's own braces literally. An odd, unbalanced `'` (as in
+ * "don't") is what genuinely needs the `''` escape; a balanced pair is almost always
+ * intentional quoting and should be left exactly as written.
+ */
+function hasBalancedQuoting(s: string): boolean {
+  let inQuote = false;
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] !== "'") continue;
+    if (s[i + 1] === "'") {
+      i++;
+      continue;
+    }
+    inQuote = !inQuote;
+  }
+  return !inQuote;
+}
 
 /** Java `.properties`: `\n`, `\t`, `\r`, `\f`, `\\` and `\uXXXX` escapes, plus an escaped separator/leading-space. */
 function unescapeProperties(s: string): string {
@@ -16,7 +41,11 @@ function unescapeProperties(s: string): string {
   });
   // MessageFormat's own `''` → `'` unescaping (see escapeProperties) — a separate,
   // upstream layer from .properties' own backslash escapes above, so undone here as
-  // its own pass rather than folded into the replace above.
+  // its own pass rather than folded into the replace above. Unconditional: a `''`
+  // pair is always one literal apostrophe per MessageFormat's own rule, and
+  // escapeProperties never introduces one for an already-balanced (intentionally
+  // quoted) value in the first place — so there's nothing here that could wrongly
+  // undo a deliberate `'{0}'`-style literal-braces idiom, which never gets doubled.
   return MESSAGE_FORMAT_PLACEHOLDER.test(out) ? out.replace(/''/g, "'") : out;
 }
 function escapeProperties(s: string): string {
@@ -24,10 +53,13 @@ function escapeProperties(s: string): string {
   // wherever `{N}` syntax appears in the same pattern, so "don't" next to "{0}"
   // either eats the placeholder or corrupts the text depending on where the next
   // `'` falls; `''` is MessageFormat's own documented escape for one literal `'`.
-  // Skipped for a value with no `{N}` at all — nothing here can tell whether THAT
-  // string is also fed through MessageFormat, so doubling its apostrophes would be
-  // as likely to put a visible `''` in front of someone as to fix anything.
-  let out = MESSAGE_FORMAT_PLACEHOLDER.test(s) ? s.replace(/'/g, "''") : s;
+  // Only an UNBALANCED quote (an odd one out, like "don't") gets this treatment —
+  // a string whose quotes are already balanced (e.g. "Type '{0}' literally", using
+  // the quote pair deliberately to show "{0}" as literal text rather than a
+  // placeholder) is left exactly as written: doubling those quotes would turn the
+  // intentional literal-braces idiom into live substitution instead, the opposite of
+  // what it's there for.
+  let out = MESSAGE_FORMAT_PLACEHOLDER.test(s) && s.includes("'") && !hasBalancedQuoting(s) ? s.replace(/'/g, "''") : s;
   out = out.replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/\t/g, "\\t").replace(/\r/g, "\\r");
   if (out[0] === " ") out = `\\${out}`;
   return out;
