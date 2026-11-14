@@ -554,6 +554,22 @@ test("pluralOneStrings: finds cardinal _one values, ignores ordinals and other c
   assert.deepEqual(pluralOneStrings(doc), new Set(["{{count}} item", "You have {{count}} file"]));
 });
 
+test("pluralOneStrings: also finds a nested {one, other} plural group (Rails YAML/Android <plurals>) and gettext's \\u0005one slot", () => {
+  // Neither shape uses the i18next "_one" suffix convention: a nested group (what
+  // addNestedPluralForms also recognizes, and what android-xml.ts produces for a
+  // <plurals> element) has no "_one" key at all, and po.ts's own flat plural keys use
+  // a "\u0005one" separator instead of an underscore. Both were previously invisible
+  // to pluralOneStrings, so Android/.po/Rails-YAML singular plurals never got the
+  // literal-"1" grammar retry engine.ts gives i18next's "_one" keys.
+  const doc = {
+    file_count: { one: "%d file", other: "%d files" },
+    "\u0004file\u0005one": "%d file",
+    "\u0004file\u0005other": "%d files",
+    plain: "not a plural key",
+  };
+  assert.deepEqual(pluralOneStrings(doc), new Set(["%d file"]));
+});
+
 test("detects dir and file layouts", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-"));
   fs.mkdirSync(path.join(root, "src/locales/en/admin"), { recursive: true });
@@ -2368,6 +2384,31 @@ test("engine: an i18next _one string is retranslated with a literal 1, fixing th
     singularHints: new Set([source]),
   });
   assert.equal(withHint.translations.get(source), "Vous avez {{count}} fichier");
+});
+
+test("engine: a non-i18next singular hint (Android <plurals>/.po's %d, not {{count}}) also gets the literal-1 grammar retry", async () => {
+  // fixSingularGrammar used to require the string's one masked placeholder to be
+  // {{count}} specifically. Android's <plurals> "one" item and .po's msgstr[0] (or
+  // msgstr[1] for Arabic) are grammatically singular the same way, but use a printf
+  // specifier (%d) instead — pluralOneStrings now surfaces these too (see its own
+  // test), so the retry must accept any single placeholder, not just {{count}}.
+  const grammarSensitive: Translator = {
+    translate: async (texts) =>
+      texts.map((s) => {
+        if (s === "{0} file") return "{0} fichiers";
+        if (s === "1 file") return "1 fichier";
+        return s;
+      }),
+    dispose: async () => {},
+  };
+  const source = "%d file";
+  const withHint = await translateStrings([source], [grammarSensitive], {
+    sourceLang: "en",
+    targetLang: "fr",
+    batchSize: 4,
+    singularHints: new Set([source]),
+  });
+  assert.equal(withHint.translations.get(source), "%d fichier");
 });
 
 test("engine: several _one keys are retranslated in one batched model call, not one call per key", async () => {

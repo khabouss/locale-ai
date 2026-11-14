@@ -519,13 +519,19 @@ export function buildTarget(
 }
 
 const PLURAL_KEY = /^(.+?)(_ordinal)?_(zero|one|two|few|many|other)$/;
+/** gettext's own flat plural-slot keys (po.ts's `pluralOneKey`/`pluralOtherKey`): `<msgid>\u0005one`/`\u0005other`, a separator no real msgid contains. */
+const PO_PLURAL_ONE_KEY = /\u0005one$/;
 
 /**
- * Source strings at a cardinal i18next "_one" plural key ("itemCount_one": "{{count}}
- * item"). These are grammatically singular in English, but the model sometimes infers
- * the TARGET's plural form anyway because {{count}} reads as an opaque marker rather
- * than a concrete number — the engine uses this set to retranslate with a real "1" in
- * place of {{count}} and recover the correct grammatical number (see engine.ts).
+ * Source strings at a cardinal "one" plural slot — either i18next's flat suffix key
+ * ("itemCount_one": "{{count}} item"), gettext's own `\u0005one` slot (po.ts), or a
+ * nested Rails/Android-style `{one: ..., other: ...}` group (the same shape
+ * `addNestedPluralForms` recognizes as a plural group, covering YAML/JSON nested
+ * plurals and Android's `<plurals>`). All three are grammatically singular in
+ * English, but the model sometimes infers the TARGET's plural form anyway because the
+ * masked count marker (`{{count}}`, `%d`, `#`) carries no number of its own — the
+ * engine uses this set to retranslate with a real "1" in its place and recover the
+ * correct grammatical number (see engine.ts).
  */
 export function pluralOneStrings(data: unknown, out: Set<string> = new Set()): Set<string> {
   const visit = (v: unknown): void => {
@@ -534,9 +540,17 @@ export function pluralOneStrings(data: unknown, out: Set<string> = new Set()): S
       return;
     }
     if (!isObj(v)) return;
-    for (const k of Object.keys(v)) {
+    const keys = Object.keys(v);
+    const isNestedGroup = keys.length >= 2 && keys.includes("other") && keys.every((k) => CATEGORIES.includes(k) && typeof v[k] === "string");
+    if (isNestedGroup) {
+      if (typeof v.one === "string") out.add(v.one);
+      return;
+    }
+    for (const k of keys) {
       const m = PLURAL_KEY.exec(k);
-      if (m && !m[2] && m[3] === "one" && typeof v[k] === "string") out.add(v[k] as string);
+      if ((m && !m[2] && m[3] === "one" && typeof v[k] === "string") || (PO_PLURAL_ONE_KEY.test(k) && typeof v[k] === "string")) {
+        out.add(v[k] as string);
+      }
       visit(v[k]);
     }
   };
