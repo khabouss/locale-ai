@@ -1,6 +1,6 @@
 {
   "name": "locale-ai",
-  "version": "0.7.16",
+  "version": "0.7.17",
   "description": "Translate your i18n locale files locally on CPU. Free, offline, no API keys.",
   "author": "Taha KHABOUSS",
   "repository": {
