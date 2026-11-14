@@ -21,17 +21,29 @@ const NUMERIC_BASE = 900;
 const NUMERIC_RE_SRC = /(?<!\d)9\d\d(?!\d)/.source;
 
 /**
- * A curly quote (“ ” ‘ ’) directly touching a placeholder. Masking only the
- * placeholder itself and leaving these as ordinary surrounding text works for every
- * other punctuation mark this project has tested against real models — but the
- * Italian and German OPUS-MT models garble this specific quote-against-brace
- * boundary even though they know the characters fine elsewhere in a sentence (seen on
- * a real hop: `“{0}”` → `[55]{0} [56]`, `‘{0}’` → `‘{0} .`). Swallowing them into the
- * SAME masked span as the placeholder sidesteps the boundary entirely, at no
- * semantic cost: the exact matched text (quotes included) is restored verbatim
- * either way, so it's harmless even where the quote isn't really "pairing" with the
- * placeholder (an unrelated possessive `{0}’s`, say).
+ * A MATCHED pair of curly quotes directly wrapping a placeholder (“{0}” or ‘{0}’).
+ * Masking only the placeholder itself and leaving these as ordinary surrounding text
+ * works for every other punctuation mark this project has tested against real
+ * models — but the Italian and German OPUS-MT models garble this specific
+ * quote-against-brace boundary even though they know the characters fine elsewhere
+ * in a sentence (seen on a real hop: `“{0}”` → `[55]{0} [56]`, `‘{0}’` → `‘{0} .`).
+ * Swallowing a matched pair into the SAME masked span as the placeholder sidesteps
+ * the boundary entirely.
+ *
+ * Only a genuine matched pair qualifies — a quote on just one side is never
+ * absorbed. Earlier this project absorbed either side independently, reasoning that
+ * restoring the exact matched text verbatim is always safe; it isn't. An unrelated
+ * trailing possessive (`{0}’s profile`) got swallowed into the same opaque span as
+ * the placeholder, and while the literal text still came back unchanged, the model
+ * could no longer see the `’s` as ordinary attachable text and lost the ability to
+ * restructure the sentence the way the target language needs
+ * (French/Italian/Spanish want "the profile of {0}", not "{0}'s profile").
+ * Verbatim-restore safety is not the same thing as translation-quality safety.
  */
+const ICU_ARG_SRC = /\{\s*[\w.-]+\s*(?:,[^{}]*)?\}/.source;
+const CURLY_QUOTE_PAIR_SRC = `“${ICU_ARG_SRC}”|‘${ICU_ARG_SRC}’`;
+
+/** The exact set of curly quote characters either side of CURLY_QUOTE_PAIR_SRC can use — used by `stripCurlyQuotePair` below to undo that absorption when comparing placeholders across languages. */
 const CURLY_QUOTE_SRC = "[“”‘’]";
 
 const SOURCES = [
@@ -44,7 +56,8 @@ const SOURCES = [
   /%\([\w.]+\)[sdifr]/.source, // %(name)s  python
   /%(?:\d+\$)?[-+0#]*\d*(?:\.\d+)?[sdifuxXeEgGcpo@](?![A-Za-z])/.source, // %s %d %1$s %.2f %@ (not "100%off")
   /@(?:\.\w+)?:\(?[\w.-]+\)?/.source, // @:key @.lower:key  vue-i18n linked messages
-  CURLY_QUOTE_SRC + "?" + /\{\s*[\w.-]+\s*(?:,[^{}]*)?\}/.source + CURLY_QUOTE_SRC + "?", // {name} {0} {count, number}  ICU simple args, plus a directly-touching curly quote on either side (see CURLY_QUOTE_SRC)
+  ICU_ARG_SRC, // {name} {0} {count, number}  ICU simple args
+  CURLY_QUOTE_PAIR_SRC, // “{0}” or ‘{0}’  a matched pair of curly quotes wrapping a placeholder (see CURLY_QUOTE_PAIR_SRC)
   /'[{}]'/.source, // '{' '}'  MessageFormat's idiom for a literal brace with nothing else inside — too short/unusual on its own for a model to reliably carry through untouched (observed dropped or multiplied on a real hop), unlike '{0}'/'{name}', where the braces' own content is already protected by the ICU-args pattern above
   /<\/?[A-Za-z][\w.:-]*(?:\s[^<>]*)?\/?>/.source, // <b> </b> <a href="..."> <Trans/>
   /<\/?\s*\d+\s*\/?>/.source, // <0> </0> <1/>  react-i18next indexed components
@@ -151,6 +164,19 @@ export function mask(text: string, style: Style = "natural", protect?: RegExp): 
   }
   masked += text.slice(pos);
   return { text: masked, tokens, style, keys };
+}
+
+/**
+ * Strips a leading+trailing curly quote from a placeholder token, if both are
+ * present, regardless of their exact style. Used when comparing a source and
+ * target's placeholder sets across languages: a translator is free to wrap a
+ * placeholder in their own language's quoting convention (German „…“, French
+ * « … »), use none at all, or rephrase a possessive away entirely — none of that
+ * should count as a different placeholder than the source's "{0}".
+ */
+export function stripCurlyQuotePair(token: string): string {
+  const re = new RegExp(`^${CURLY_QUOTE_SRC}([\\s\\S]*)${CURLY_QUOTE_SRC}$`, "u");
+  return re.exec(token)?.[1] ?? token;
 }
 
 /** The numeric style can only be used when the text has no numbers that look like markers. */

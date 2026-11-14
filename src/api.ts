@@ -34,7 +34,7 @@ import {
   type LocaleDoc,
 } from "./locales.ts";
 import { install, isInstalled, loadTranslator, localModelProblem, planInstall, type InstallPlan, type Translator } from "./models.ts";
-import { hasTranslatableText, mask } from "./placeholders.ts";
+import { hasTranslatableText, mask, stripCurlyQuotePair } from "./placeholders.ts";
 
 /** Built-in models plus the project's own config (which take priority) — same resolution `cli.ts` uses. */
 export function fullCatalog(config: ProjectConfig, cwd: string): ModelEntry[] {
@@ -490,9 +490,17 @@ export async function check(opts: CheckOptions = {}): Promise<CheckResult> {
           continue;
         }
         const srcMasked = mask(srcVal, "natural");
+        const tgtMasked = mask(tgtVal, "natural");
         const srcTokens = srcMasked.tokens.toSorted();
-        const tgtTokens = mask(tgtVal, "natural").tokens.toSorted();
-        if (srcTokens.join("\u0001") !== tgtTokens.join("\u0001")) {
+        const tgtTokens = tgtMasked.tokens.toSorted();
+        // Compare with quotes stripped: a translation is free to wrap a placeholder in
+        // its own language's quoting convention, use none, or rephrase a possessive
+        // away — none of that is a real placeholder mismatch (see stripCurlyQuotePair).
+        // Strip before sorting: sorting the raw (quote-including) tokens first could
+        // order a quoted source token differently from its unquoted target counterpart.
+        const srcKey = srcMasked.tokens.map(stripCurlyQuotePair).toSorted().join("\u0001");
+        const tgtKey = tgtMasked.tokens.map(stripCurlyQuotePair).toSorted().join("\u0001");
+        if (srcKey !== tgtKey) {
           mismatched++;
           issues.push({ locale: to, kind: "placeholder-mismatch", target, path: p, sourcePlaceholders: srcTokens, targetPlaceholders: tgtTokens });
           continue;

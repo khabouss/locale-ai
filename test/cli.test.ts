@@ -88,6 +88,31 @@ test("check flags a target plural/select with a dropped \"other\" or unbalanced 
   assert.match(result.output, /"files".*broken plural\/select/);
 });
 
+test("check does not flag a translation that uses its own language's quote style, or rephrases a possessive, as a placeholder mismatch", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-cli-quote-"));
+  fs.mkdirSync(path.join(dir, "locales/en"), { recursive: true });
+  fs.mkdirSync(path.join(dir, "locales/fr"), { recursive: true });
+  fs.mkdirSync(path.join(dir, "locales/de"), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, "locales/en/common.json"),
+    JSON.stringify({ curly: "The file “{name}” was deleted.", possessive: "{name}’s profile was updated." }, null, 2),
+  );
+  // fr: native guillemets around the placeholder, and a rephrased possessive with no quotes at all.
+  fs.writeFileSync(
+    path.join(dir, "locales/fr/common.json"),
+    JSON.stringify({ curly: "Le fichier « {name} » a été supprimé.", possessive: "Le profil de {name} a été mis à jour." }, null, 2),
+  );
+  // de: low-9/high-6 convention, mismatched on its own open/close characters.
+  fs.writeFileSync(
+    path.join(dir, "locales/de/common.json"),
+    JSON.stringify({ curly: "Die Datei „{name}“ wurde gelöscht.", possessive: "{name}s Profil wurde aktualisiert." }, null, 2),
+  );
+
+  const result = run(["check"], dir);
+  assert.equal(result.status, 0, result.output);
+  assert.doesNotMatch(result.output, /placeholders differ/);
+});
+
 test("a merge-conflicted lockfile fails loudly instead of being silently wiped", () => {
   const dir = setupTranslatedProject();
   fs.writeFileSync(
