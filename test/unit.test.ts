@@ -1398,6 +1398,76 @@ test("Java .properties: two unrelated elisions in the same value are both double
   assert.equal((reread.data as Record<string, string>).missing, "L'{0} n'existe pas");
 });
 
+test("Java .properties: ''{0}'' (quoted substituted value) round-trips distinctly from '{0}' (literal unsubstituted braces), and a lone/named quoted brace isn't doubled", () => {
+  // 0.7.20's fix only recognized the single-quote `'{0}'` idiom (literal braces, no
+  // substitution). Two problems it didn't cover, both reported after a real fr/de run:
+  //
+  // 1. `''{0}''` is MessageFormat's OTHER quoting idiom — a common Spring/Bean
+  //    Validation pattern ("The value ''{0}'' is not valid.") that wraps the
+  //    *substituted* value in a literal apostrophe (since `''` never opens a quoted
+  //    run, {0} in between still gets replaced). `unescapeProperties` collapses it to
+  //    the same `'{0}'` text as the literal-braces idiom the moment the source is
+  //    read, before translation ever happens — so by write time there's no way to
+  //    tell the two apart from the text alone. The fix captures which argument
+  //    indices used the doubled form straight from the raw source line (`QUOTED_ARG_RE`)
+  //    and carries that alongside the key, so write-time escaping knows to double
+  //    those quotes rather than protect them, no matter what the translated text
+  //    around {0} looks like. (The German case broke even in 0.7.19, not just
+  //    0.7.20, since 0.7.19's literal-braces idiom — same single-quote shape — won
+  //    there too whenever there was no OTHER apostrophe to balance against.)
+  // 2. `'{'` (a lone literal brace) and `'{name}'` (literal, non-numeric braces) are
+  //    also MessageFormat's literal-quoting idiom, just not shaped like a `{N}`
+  //    placeholder — 0.7.20's placeholder-shaped regex didn't recognize them and
+  //    doubled their quotes, which 0.7.19 (by sheer luck of its whole-string-balance
+  //    check) and 0.7.18 (narrower, digit-only) had both gotten wrong in their own
+  //    ways. Broadened to match any quote directly touching a brace, balanced or
+  //    lone — still requiring direct touch, so the elision-regression fix from
+  //    0.7.20 stays intact.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-properties-quoted-value-"));
+  const file = path.join(root, "en.properties");
+  fs.writeFileSync(
+    file,
+    "invalid=The value ''{0}'' is not valid.\n" +
+      "block=Use '{' to open a block in {0}\n" +
+      "named=Write '{name}' to insert {0}\n",
+  );
+  const doc = readLocaleDoc(file, "en", true);
+  assert.equal(
+    JSON.stringify(doc.data),
+    JSON.stringify({
+      invalid: "The value '{0}' is not valid.",
+      block: "Use '{' to open a block in {0}",
+      named: "Write '{name}' to insert {0}",
+    }),
+  );
+
+  const out = doc.serialize(
+    {
+      invalid: "La valeur '{0}' n'est pas valide.",
+      block: "Utilisez '{' pour ouvrir un bloc dans {0}",
+      named: "Écrivez '{name}' pour insérer {0}",
+    },
+    "fr",
+  );
+  assert.equal(
+    out,
+    "invalid=La valeur ''{0}'' n''est pas valide.\n" +
+      "block=Utilisez '{' pour ouvrir un bloc dans {0}\n" +
+      "named=Écrivez '{name}' pour insérer {0}\n",
+  );
+
+  // A value with no OTHER apostrophe to balance against (the German case) must still
+  // get the quoted-value idiom's quotes doubled, not left single.
+  const outDe = doc.serialize({ invalid: "Der Wert '{0}' ist nicht gültig.", block: "x {0}", named: "y {0}" }, "de");
+  assert.match(outDe, /^invalid=Der Wert ''\{0\}'' ist nicht gültig\.\n/);
+
+  fs.writeFileSync(path.join(root, "fr.properties"), out);
+  const reread = readLocaleDoc(path.join(root, "fr.properties"), "fr", true);
+  assert.equal((reread.data as Record<string, string>).invalid, "La valeur '{0}' n'est pas valide.");
+  assert.equal((reread.data as Record<string, string>).block, "Utilisez '{' pour ouvrir un bloc dans {0}");
+  assert.equal((reread.data as Record<string, string>).named, "Écrivez '{name}' pour insérer {0}");
+});
+
 test("XLIFF 1.2: detection via --input (untagged source), target filename convention, source-language mismatch is rejected", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-xliff-"));
   const file = path.join(root, "messages.xlf");

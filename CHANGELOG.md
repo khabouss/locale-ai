@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.21
+
+Fixes two more regressions from 0.7.20's elision fix, caught by re-testing that release against a real fr/de model run ([khabouss/locale-ai#37](https://github.com/khabouss/locale-ai/issues/37)):
+
+- **`''{0}''` (MessageFormat's quoted-substituted-value idiom, common in Spring/Bean Validation messages) lost its value** — `unescapeProperties`'s `''`→`'` collapse on read turns `''{0}''` into the exact same text as `'{0}'` (the OTHER idiom, which suppresses substitution instead) before translation ever happens, so by write time there's no way to tell which one the source used from the text alone — 0.7.20's fix always guessed the suppressing one. Which argument indices used the doubled form is now captured straight from the raw source line, before that collapse, and carried alongside the key (the same way a `\uXXXX` convention already is) so write-time escaping doubles those quotes instead of protecting them, regardless of what the translated text looks like. Not strictly a new bug: 0.7.19 already broke this whenever the translation had no other apostrophe to coincidentally balance against (the German case); 0.7.20 broke it every time.
+- **Quoting a lone brace (`'{'`) or a non-numeric braced name (`'{name}'`) got doubled, which then makes `MessageFormat` throw** — 0.7.20's literal-braces detection only recognized the `{N[,type]}`-shaped numbered-placeholder form. Broadened to any quote directly touching a brace — a balanced `{...}` run or a lone `{`/`}` — while still requiring direct touch, so the elision-regression fix from 0.7.20 stays intact.
+
 ## 0.7.20
 
 Fixes a regression from 0.7.19's intentional-quoting fix, caught by re-testing that release against a real model run ([khabouss/locale-ai#35](https://github.com/khabouss/locale-ai/issues/35)):

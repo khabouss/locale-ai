@@ -12,17 +12,35 @@ import { isObj, type LocaleDoc, newObj, type Obj } from "./shared.ts";
 const MESSAGE_FORMAT_PLACEHOLDER = /\{\d+(,[^{}]+)?\}/;
 
 /**
- * Matches the exact `'{0}'`/`'{0,number,integer}'` idiom — a quote directly before a
- * placeholder's opening brace and another directly after its closing brace — which is
- * MessageFormat's own documented way to show a placeholder's braces literally (no
- * substitution). Only *these two specific quote characters* are left alone on write;
- * every other apostrophe, including a lone one that merely happens to sit next to an
- * unrelated brace (French elision right before a placeholder, as in `"L'{0} n'existe
- * pas"`), still needs the `''` escape. Counting the string's apostrophes and checking
- * whether they're even (the previous approach) doesn't work: two unrelated elisions
- * pair up by coincidence just as often as one genuine `'{0}'` idiom does.
+ * Matches MessageFormat's literal-brace quoting idiom — a quote directly touching an
+ * opening `{` and another directly touching the matching `}` (`'{0}'`,
+ * `'{0,number,integer}'`, `'{name}'`), or a quote wrapping a single stray `{`/`}` on
+ * its own (`'{'`, `'}'`) — all of which show the brace(s) as literal text rather than
+ * invoking placeholder syntax. Only *these specific quote characters* are left alone
+ * on write (unless the same placeholder's VALUE was itself quoted in the source — see
+ * `QUOTED_ARG_RE` below); every other apostrophe, including a lone one that merely
+ * happens to sit next to an unrelated brace (French elision right before a
+ * placeholder, as in `"L'{0} n'existe pas"`), still needs the `''` escape. Requiring
+ * direct adjacency to the brace (not just "a brace somewhere between two quotes") is
+ * what keeps that case safe: nothing sits between the quote and the brace here, but
+ * in `"L'objet {0} n'existe pas"` the first quote is followed by "objet ", not `{`, so
+ * it doesn't match and both elisions still get doubled individually.
  */
-const LITERAL_BRACE_QUOTE_RE = /'(\{\d+(?:,[^{}]+)?\})'/g;
+const LITERAL_BRACE_QUOTE_RE = /'(\{[^{}']*\}|[{}])'/g;
+
+/**
+ * Matches MessageFormat's *other* quoting idiom — `''{0}''` — which doubles the
+ * apostrophe on each side of a placeholder to show its *substituted value* wrapped in
+ * a literal apostrophe (since `''` is always one literal apostrophe and never opens a
+ * quoted run, {0} in between is substituted normally). This is the opposite of
+ * `LITERAL_BRACE_QUOTE_RE`'s single-quote idiom, which suppresses substitution
+ * instead — and once read, the two collapse to the exact same single-quote text
+ * (`unescapeProperties`'s `''`→`'` pass can't tell them apart), so which one a given
+ * placeholder index used has to be captured straight from the raw source line, before
+ * that collapse happens, and carried alongside the key so write-time escaping can
+ * reapply the right one.
+ */
+const QUOTED_ARG_RE = /''\{(\d+)(?:,[^{}]+)?\}''/g;
 
 /** Java `.properties`: `\n`, `\t`, `\r`, `\f`, `\\` and `\uXXXX` escapes, plus an escaped separator/leading-space. */
 function unescapeProperties(s: string): string {
@@ -39,20 +57,34 @@ function unescapeProperties(s: string): string {
   // wrongly undo one.
   return MESSAGE_FORMAT_PLACEHOLDER.test(out) ? out.replace(/''/g, "'") : out;
 }
-function escapeProperties(s: string): string {
+const NO_QUOTED_ARGS: ReadonlySet<number> = new Set();
+
+/**
+ * `quotedArgs` is the set of placeholder argument indices (the `N` in `{N}`) whose
+ * *value* was wrapped in doubled quotes (`''{N}''`) in this key's own source text —
+ * passed in from the source-side scan (`QUOTED_ARG_RE`) that read it, since nothing
+ * in the translated text itself can tell that idiom apart from the single-quote
+ * literal-braces one once a round-trip through `unescapeProperties` has collapsed
+ * both to the same plain `'{N}'` text (see QUOTED_ARG_RE's own comment).
+ */
+function escapeProperties(s: string, quotedArgs: ReadonlySet<number> = NO_QUOTED_ARGS): string {
   // MessageFormat treats a bare `'` as the start of a quoted (literal-braces) run
   // wherever `{N}` syntax appears in the same pattern, so "don't" next to "{0}"
   // either eats the placeholder or corrupts the text depending on where the next
   // `'` falls; `''` is MessageFormat's own documented escape for one literal `'`.
-  // Every apostrophe gets doubled EXCEPT the two forming a genuine `'{0}'`-literal
+  // Every apostrophe gets doubled EXCEPT the two forming a genuine literal-braces
   // idiom (see LITERAL_BRACE_QUOTE_RE) — doubling those would turn the intentional
   // literal-braces idiom into live substitution instead, the opposite of what it's
-  // there for.
+  // there for. An index in `quotedArgs` is the other idiom instead (`''{N}''`,
+  // wrapping the *substituted value*, not suppressing it) — its two quotes are
+  // doubled, not protected, same as any other apostrophe.
   let out = s;
   if (MESSAGE_FORMAT_PLACEHOLDER.test(s) && s.includes("'")) {
     const kept = new Set<number>();
     LITERAL_BRACE_QUOTE_RE.lastIndex = 0;
     for (let m = LITERAL_BRACE_QUOTE_RE.exec(s); m; m = LITERAL_BRACE_QUOTE_RE.exec(s)) {
+      const arg = /^\{(\d+)/.exec(m[1]);
+      if (arg && quotedArgs.has(Number(arg[1]))) continue;
       kept.add(m.index);
       kept.add(m.index + m[0].length - 1);
     }
@@ -71,8 +103,8 @@ function escapeProperties(s: string): string {
  * `\uXXXX` escapes rather than literal UTF-8, so the project's own escaping
  * convention for that key is kept instead of switching it to raw UTF-8 on write.
  */
-function escapePropertiesUnicode(s: string): string {
-  const escaped = escapeProperties(s);
+function escapePropertiesUnicode(s: string, quotedArgs?: ReadonlySet<number>): string {
+  const escaped = escapeProperties(s, quotedArgs);
   let out = "";
   for (let i = 0; i < escaped.length; i++) {
     const code = escaped.charCodeAt(i);
@@ -107,11 +139,14 @@ function splitPropertyLine(line: string): { key: string; valueStart: number } | 
 type PropBlock = { text: string } | { key: string; prefix: string };
 
 /** Parses `.properties` text into passthrough lines (comments, blank lines, unparsable lines) and key/value entries. */
-function parsePropertiesBlocks(text: string): { blocks: PropBlock[]; data: Obj; unicodeKeys: Set<string> } {
+function parsePropertiesBlocks(
+  text: string,
+): { blocks: PropBlock[]; data: Obj; unicodeKeys: Set<string>; quotedArgKeys: Map<string, Set<number>> } {
   const physical = text.split(/\r?\n/);
   const blocks: PropBlock[] = [];
   const data = newObj();
   const unicodeKeys = new Set<string>();
+  const quotedArgKeys = new Map<string, Set<number>>();
   let i = 0;
   while (i < physical.length) {
     const line = physical[i];
@@ -133,10 +168,12 @@ function parsePropertiesBlocks(text: string): { blocks: PropBlock[]; data: Obj; 
     }
     data[split.key] = unescapeProperties(valueRaw);
     if (/\\u[0-9a-fA-F]{4}/.test(valueRaw)) unicodeKeys.add(split.key);
+    const args = new Set([...valueRaw.matchAll(QUOTED_ARG_RE)].map((m) => Number(m[1])));
+    if (args.size) quotedArgKeys.set(split.key, args);
     blocks.push({ key: split.key, prefix: line.slice(0, split.valueStart) });
     i++;
   }
-  return { blocks, data, unicodeKeys };
+  return { blocks, data, unicodeKeys, quotedArgKeys };
 }
 
 /**
@@ -158,11 +195,14 @@ function parsePropertiesBlocks(text: string): { blocks: PropBlock[]; data: Obj; 
  * raw UTF-8.
  */
 export function readPropertiesDoc(file: string, text: string): LocaleDoc {
-  const { blocks, data, unicodeKeys } = parsePropertiesBlocks(text);
+  const { blocks, data, unicodeKeys, quotedArgKeys } = parsePropertiesBlocks(text);
   const serialize = (d: unknown, _targetTag: string, existingText?: string): string => {
     const obj = isObj(d) ? d : newObj();
-    const base = existingText !== undefined ? parsePropertiesBlocks(existingText) : { blocks, unicodeKeys };
-    const escapeFor = (k: string) => (base.unicodeKeys.has(k) ? escapePropertiesUnicode : escapeProperties);
+    const base = existingText !== undefined ? parsePropertiesBlocks(existingText) : { blocks, unicodeKeys, quotedArgKeys };
+    const escapeFor = (k: string) => {
+      const args = base.quotedArgKeys.get(k);
+      return (v: string) => (base.unicodeKeys.has(k) ? escapePropertiesUnicode(v, args) : escapeProperties(v, args));
+    };
     const seen = new Set<string>();
     const lines = base.blocks.map((b) => {
       if (!("key" in b)) return b.text;
@@ -172,7 +212,9 @@ export function readPropertiesDoc(file: string, text: string): LocaleDoc {
     for (const k of Object.keys(obj)) {
       if (seen.has(k) || typeof obj[k] !== "string") continue;
       // Never-before-seen key: no target-side convention to follow, so fall back to the source's own.
-      lines.push(`${k}=${(unicodeKeys.has(k) ? escapePropertiesUnicode : escapeProperties)(obj[k] as string)}`);
+      const args = quotedArgKeys.get(k);
+      const esc = unicodeKeys.has(k) ? escapePropertiesUnicode(obj[k] as string, args) : escapeProperties(obj[k] as string, args);
+      lines.push(`${k}=${esc}`);
     }
     return lines.join("\n");
   };
