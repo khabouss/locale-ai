@@ -69,11 +69,26 @@ const ANDROID_REF_RE = /^@[a-zA-Z_][\w.]*\/[\w.]+$/;
 interface AndroidEntry {
   comment?: string;
   name: string;
+  /** The `product="..."` qualifier (e.g. "tablet"), for the (rare) case of several device-specific variants sharing one `name` — see `dataKey`. */
+  product?: string;
   translatable: boolean;
   kind: "string" | "array" | "plural";
   /** For kind "string" only: the value was wrapped in a literal `"..."` pair in the source, which Android uses to preserve leading/trailing whitespace that would otherwise be trimmed — kept on write. */
   quoted?: boolean;
 }
+
+/**
+ * Android lets several `<string>`/`<string-array>`/`<plurals>` elements share one
+ * `name`, distinguished only by a `product="..."` qualifier (e.g. `product="tablet"`
+ * vs `product="default"`) — the build picks one per device config. Keying `data`
+ * purely by `name` collapsed every variant into the one that happened to be read
+ * last, silently dropping the others and their `product` attribute entirely (two
+ * identical `<string name="title">` elements on write, which aapt2 rejects as a
+ * duplicate resource). Disambiguated only when `name` actually repeats, so the
+ * overwhelmingly common single-variant case keeps its plain, unqualified key.
+ */
+const dataKey = (name: string, product: string | undefined, repeated: boolean) =>
+  repeated ? `${name}[${product ?? "default"}]` : name;
 
 /**
  * Android `strings.xml`: `<string>`/`<string-array>`/`<plurals>` elements under a
@@ -133,31 +148,41 @@ export function readAndroidXmlDoc(file: string, text: string): LocaleDoc {
   const data = newObj();
   const entries: AndroidEntry[] = [];
   const elementRe = /(?:(<!--[\s\S]*?-->)\s*\r?\n\s*)?<(string-array|string|plurals)\b([^>]*)(?:\/>|>([\s\S]*?)<\/\2>)/g;
+  const nameCounts = new Map<string, number>();
+  for (const m of body.matchAll(elementRe)) {
+    const n = /\bname="([^"]*)"/.exec(m[3])?.[1];
+    if (n !== undefined) {
+      const name = unescapeAndroidXml(n);
+      nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
+    }
+  }
   for (const m of body.matchAll(elementRe)) {
     const [, comment, tag, attrsRaw, inner] = m;
     const nameMatch = /\bname="([^"]*)"/.exec(attrsRaw);
     if (!nameMatch) continue;
     const name = unescapeAndroidXml(nameMatch[1]);
+    const product = /\bproduct="([^"]*)"/.exec(attrsRaw)?.[1];
+    const key = dataKey(name, product, (nameCounts.get(name) ?? 0) > 1);
     const translatable = !/\btranslatable\s*=\s*["']false["']/.test(attrsRaw);
     if (tag === "string") {
       const trimmed = (inner ?? "").trim();
       const quoted = trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"');
       const value = unescapeAndroidXml(quoted ? trimmed.slice(1, -1) : trimmed);
       const isRef = ANDROID_REF_RE.test(value);
-      entries.push({ comment, name, translatable: translatable && !isRef, kind: "string", quoted });
-      if (translatable && !isRef) data[name] = value;
+      entries.push({ comment, name, product, translatable: translatable && !isRef, kind: "string", quoted });
+      if (translatable && !isRef) data[key] = value;
     } else if (tag === "string-array") {
-      entries.push({ comment, name, translatable, kind: "array" });
+      entries.push({ comment, name, product, translatable, kind: "array" });
       const items = [...(inner ?? "").matchAll(/<item\b[^>]*>([\s\S]*?)<\/item>/g)].map((im) => unescapeAndroidXml(im[1].trim()));
-      if (translatable) data[name] = items;
+      if (translatable) data[key] = items;
     } else {
-      entries.push({ comment, name, translatable, kind: "plural" });
+      entries.push({ comment, name, product, translatable, kind: "plural" });
       if (translatable) {
         const plural = newObj();
         for (const im of (inner ?? "").matchAll(/<item\s+quantity="(\w+)"[^>]*>([\s\S]*?)<\/item>/g)) {
           plural[im[1]] = unescapeAndroidXml(im[2].trim());
         }
-        data[name] = plural;
+        data[key] = plural;
       }
     }
   }
@@ -167,26 +192,33 @@ export function readAndroidXmlDoc(file: string, text: string): LocaleDoc {
   const indent = /\r?\n([ \t]+)</.exec(body)?.[1] ?? "    ";
   const keepNewline = finalNewline(text);
   const raw = newObj();
-  for (const m of body.matchAll(elementRe)) raw[/\bname="([^"]*)"/.exec(m[3])![1]] = m[0];
+  for (const m of body.matchAll(elementRe)) {
+    const n = /\bname="([^"]*)"/.exec(m[3])?.[1];
+    if (n === undefined) continue;
+    const name = unescapeAndroidXml(n);
+    const p = /\bproduct="([^"]*)"/.exec(m[3])?.[1];
+    raw[dataKey(name, p, (nameCounts.get(name) ?? 0) > 1)] = m[0];
+  }
 
   const serialize = (d: unknown): string => {
     const obj = isObj(d) ? d : newObj();
     const blocks: string[] = [];
     for (const e of entries) {
-      const attr = e.translatable ? "" : ' translatable="false"';
+      const key = dataKey(e.name, e.product, (nameCounts.get(e.name) ?? 0) > 1);
+      const attr = (e.product !== undefined ? ` product="${escapeAndroidXml(e.product)}"` : "") + (e.translatable ? "" : ' translatable="false"');
       let tag: string;
       if (!e.translatable) {
-        tag = (raw[e.name] as string).replace(/^<!--[\s\S]*?-->\s*\r?\n\s*/, "");
+        tag = (raw[key] as string).replace(/^<!--[\s\S]*?-->\s*\r?\n\s*/, "");
       } else if (e.kind === "string") {
-        const v = typeof obj[e.name] === "string" ? (obj[e.name] as string) : "";
+        const v = typeof obj[key] === "string" ? (obj[key] as string) : "";
         const escaped = escapeAndroidXmlKeepTags(v);
         tag = `<string name="${escapeAndroidXml(e.name)}"${attr}>${e.quoted ? `"${escaped}"` : escaped}</string>`;
       } else if (e.kind === "array") {
-        const items = Array.isArray(obj[e.name]) ? (obj[e.name] as unknown[]) : [];
+        const items = Array.isArray(obj[key]) ? (obj[key] as unknown[]) : [];
         const lines = items.map((v) => `${indent}${indent}<item>${escapeAndroidXmlKeepTags(typeof v === "string" ? v : "")}</item>`);
         tag = `<string-array name="${escapeAndroidXml(e.name)}"${attr}>\n${lines.join("\n")}\n${indent}</string-array>`;
       } else {
-        const plural = isObj(obj[e.name]) ? (obj[e.name] as Obj) : newObj();
+        const plural = isObj(obj[key]) ? (obj[key] as Obj) : newObj();
         const lines = CATEGORIES.filter((c) => typeof plural[c] === "string").map(
           (c) => `${indent}${indent}<item quantity="${c}">${escapeAndroidXmlKeepTags(plural[c] as string)}</item>`,
         );

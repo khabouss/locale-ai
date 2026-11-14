@@ -845,6 +845,39 @@ test("Android strings.xml: translatable='false' (single quotes) is honored, and 
   assert.equal(JSON.stringify(doc.data), JSON.stringify({ app_name: "My App" }));
 });
 
+test("Android strings.xml: several product-qualified variants sharing one name keep their own product attribute, not one duplicate pair", () => {
+  // <string name="title" product="tablet"> and product="default"> are two distinct,
+  // device-specific resources — keying purely by name collapsed them into whichever
+  // was read last and dropped the product attribute entirely, writing two identical
+  // <string name="title"> elements (a duplicate-resource error under aapt2).
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-android-product-"));
+  const file = path.join(dir, "strings.xml");
+  fs.writeFileSync(
+    file,
+    `<resources>
+    <string name="title" product="tablet">Welcome, tablet user</string>
+    <string name="title" product="default">Welcome</string>
+    <string name="subtitle">Single variant, unaffected</string>
+</resources>
+`,
+  );
+  const doc = readLocaleDoc(file, "en", true, false);
+  assert.equal(
+    JSON.stringify(doc.data),
+    JSON.stringify({ "title[tablet]": "Welcome, tablet user", "title[default]": "Welcome", subtitle: "Single variant, unaffected" }),
+  );
+  const out = doc.serialize({
+    "title[tablet]": "Bienvenue, utilisateur tablette",
+    "title[default]": "Bienvenue",
+    subtitle: "Variante unique, non affectée",
+  });
+  assert.match(out, /<string name="title" product="tablet">Bienvenue, utilisateur tablette<\/string>/);
+  assert.match(out, /<string name="title" product="default">Bienvenue<\/string>/);
+  // The single-variant string keeps its plain, unqualified key and no product attribute.
+  assert.match(out, /<string name="subtitle">Variante unique, non affectée<\/string>/);
+  assert.equal([...out.matchAll(/<string name="title"/g)].length, 2, "both variants must survive, not collapse into one");
+});
+
 test("Apple .xcstrings: source extraction skips shouldTranslate=false/device variants, falls back to the key itself", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-xcstrings-"));
   const file = path.join(dir, "Localizable.xcstrings");
