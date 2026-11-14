@@ -273,6 +273,34 @@ test("lock: a source edit is detected as stale; a translator edit is flagged, no
   assert.notEqual(hashOf("x"), hashOf("y"));
 });
 
+test("lock: two concurrent processes translating different locales both keep their lock history (no lost update)", async () => {
+  // Regression: mergeAndSaveLock (src/lock.ts) re-reads the lock fresh from disk and
+  // merges in only this run's own delta, under a cross-process file lock — instead of
+  // the old pattern of loading once at process start and writing that whole in-memory
+  // snapshot back at the end. Without it, two separate `locale-ai translate` processes
+  // (e.g. one `--to fr`, one `--to es`) started close together each see the same
+  // starting snapshot; whichever finishes and saves last would silently erase the
+  // other's lock history for the locale it didn't itself just translate — exactly what
+  // this test spawns two real OS processes to rule out.
+  const { spawn } = await import("node:child_process");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-lock-race-"));
+  const lockPath = path.join(dir, "locale-ai.lock.json");
+  const worker = path.join(import.meta.dirname, "fixtures/lock-race-worker.ts");
+  const run = (localeTag: string) =>
+    new Promise<void>((resolve, reject) => {
+      const child = spawn(process.execPath, [worker, lockPath, localeTag, "50"], { stdio: "inherit" });
+      child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`${localeTag} worker exited ${code}`))));
+      child.on("error", reject);
+    });
+  await Promise.all([run("fr"), run("es")]);
+
+  const lock = loadLock(lockPath);
+  const tags = lock.entries["en.json#greeting"];
+  assert.ok(tags, "the key survived at all");
+  assert.equal(tags!.fr, `${hashOf("Hello")}:${hashOf("Hello-fr")}`, "fr's entry wasn't lost to es's save, or vice versa");
+  assert.equal(tags!.es, `${hashOf("Hello")}:${hashOf("Hello-es")}`, "es's entry wasn't lost to fr's save, or vice versa");
+});
+
 test("lock: an unparseable (e.g. merge-conflicted) lock file throws instead of being silently discarded", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-lock-conflict-"));
   const file = path.join(dir, "locale-ai.lock.json");

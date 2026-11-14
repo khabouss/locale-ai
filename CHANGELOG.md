@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.17
+
+- **Two concurrent `translate` processes for different locales could race on `locale-ai.lock.json`, silently losing one locale's history** — each process loaded the lock once at startup and wrote back that whole in-memory snapshot at the end, so whichever finished last overwrote the other's entries entirely (translated files on disk were unaffected; only the lock's staleness/edit-detection history for the "losing" locale was lost). The lock's save path now re-reads the file fresh from disk and merges in only the current run's own delta, under a cross-process file lock, so two runs' saves can no longer clobber each other ([khabouss/locale-ai#29](https://github.com/khabouss/locale-ai/issues/29)).
+
 ## 0.7.16
 
 - **A legitimately empty source string (`""`) was re-"translated" on every run, forever** — `needsTranslation` treated any empty-string target as unfinished without checking whether the source is also empty, in which case an empty target is already the correct, final translation. This silently broke the documented "re-runs are a no-op" guarantee: a locale file with an empty string anywhere would report `N strings translated, 0 files written` on every single run, never settling. Found during post-release deep testing of v0.7.15 against adversarial fixtures (empty and whitespace-only values). Fixed by only requiring re-translation of an empty target when the source itself is non-empty ([khabouss/locale-ai#26](https://github.com/khabouss/locale-ai/issues/26)).
