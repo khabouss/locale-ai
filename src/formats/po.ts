@@ -79,6 +79,24 @@ function pluralCount(lang: string): number {
   return Number(/nplurals=(\d+)/.exec(pluralFormsHeader(lang))![1]);
 }
 
+/**
+ * Which `msgstr[]` index a language's own Plural-Forms formula resolves to for n==1
+ * — almost always 0, but not for Arabic, whose formula puts n==0 ("zero") at index
+ * 0 and n==1 ("one") at index 1. Evaluating the formula itself (rather than assuming
+ * index 0) keeps this self-consistent with whatever `pluralCount`/`pluralFormsHeader`
+ * already wrote for the same language, for every hardcoded and CLDR-derived case.
+ */
+function singularIndex(lang: string): number {
+  const expr = /plural=(.*);\s*$/.exec(pluralFormsHeader(lang))![1];
+  try {
+    // The expression is always one of this file's own hardcoded/generated strings,
+    // never user input, and is just a ternary chain over `n` — safe to evaluate.
+    return Number(new Function("n", `return (${expr});`)(1));
+  } catch {
+    return 0;
+  }
+}
+
 function parsePo(text: string): { entries: PoEntry[]; leading: string[] } {
   const entries: PoEntry[] = [];
   let leading: string[] = [];
@@ -155,7 +173,7 @@ function withFuzzyFlag(comments: string[]): string[] {
   return comments.map((c, j) => (j === i ? `${c}, fuzzy` : c));
 }
 
-export function readPoDoc(file: string, text: string, isSource: boolean, fuzzy: boolean): LocaleDoc {
+export function readPoDoc(file: string, text: string, isSource: boolean, fuzzy: boolean, tag: string): LocaleDoc {
   const { entries, leading } = parsePo(text);
   const data = newObj();
   for (const e of entries) {
@@ -173,8 +191,12 @@ export function readPoDoc(file: string, text: string, isSource: boolean, fuzzy: 
       // (msgid/msgid_plural are the stable keys, identical across every locale).
       const forms = e.msgstrPlural ?? [];
       const useMsgid = isSource && forms.every((f) => f === "");
-      data[pluralOneKey(e)] = useMsgid ? e.msgid : forms[0] ?? "";
-      data[pluralOtherKey(e)] = useMsgid ? e.msgidPlural! : forms[forms.length - 1] ?? forms[0] ?? "";
+      // Which index is the singular ("one") form is this FILE's own language's own
+      // call (see singularIndex) — almost always 0, but 1 for Arabic, whose index 0
+      // is the "zero" category instead.
+      const oneIdx = singularIndex(tag);
+      data[pluralOneKey(e)] = useMsgid ? e.msgid : forms[oneIdx] ?? "";
+      data[pluralOtherKey(e)] = useMsgid ? e.msgidPlural! : forms[forms.length - 1] ?? forms[oneIdx] ?? "";
     }
   }
   const keepNewline = finalNewline(text);
@@ -224,13 +246,16 @@ export function readPoDoc(file: string, text: string, isSource: boolean, fuzzy: 
         const one = typeof obj[oneKey] === "string" ? (obj[oneKey] as string) : e.msgid;
         const other = typeof obj[otherKey] === "string" ? (obj[otherKey] as string) : e.msgidPlural;
         const n = pluralCount(targetTag);
+        const oneIdx = singularIndex(targetTag);
         // Not full grammatical inflection (same simplification as addPluralForms for
-        // i18next): index 0 gets the singular-sourced form, every other index the
-        // plural-sourced one. A language with only one category (ja, zh, ...) gets
-        // just the plural form, since it has no separate singular count.
-        for (let i = 0; i < n; i++) content.push(`msgstr[${i}] "${escapeC(n === 1 ? other : i === 0 ? one : other)}"`);
+        // i18next): the index the target's own formula resolves to for n==1 gets the
+        // singular-sourced form (0 for almost every language, but 1 for Arabic, whose
+        // index 0 is the "zero" category), every other index the plural-sourced one.
+        // A language with only one category (ja, zh, ...) gets just the plural form,
+        // since it has no separate singular count.
+        for (let i = 0; i < n; i++) content.push(`msgstr[${i}] "${escapeC(n === 1 ? other : i === oneIdx ? one : other)}"`);
         const forms = existingEntry?.msgstrPlural;
-        changed = !forms || forms[0] !== one || forms[forms.length - 1] !== other;
+        changed = !forms || forms[oneIdx] !== one || forms[forms.length - 1] !== other;
       } else {
         const key = poKey(e);
         seen.add(key);

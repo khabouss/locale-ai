@@ -61,6 +61,7 @@ const SOURCES = [
   /'[{}]'/.source, // '{' '}'  MessageFormat's idiom for a literal brace with nothing else inside — too short/unusual on its own for a model to reliably carry through untouched (observed dropped or multiplied on a real hop), unlike '{0}'/'{name}', where the braces' own content is already protected by the ICU-args pattern above
   /<\/?[A-Za-z][\w.:-]*(?:\s[^<>]*)?\/?>/.source, // <b> </b> <a href="..."> <Trans/>
   /<\/?\s*\d+\s*\/?>/.source, // <0> </0> <1/>  react-i18next indexed components
+  /&lt;\/?[A-Za-z][\w.:-]*(?:\s[^<>]*)?\/?&gt;/.source, // &lt;b&gt;  text that documents/displays a tag literally (XLIFF/.resx) rather than embedding it — placed before the generic entity-reference pattern below so the whole span is masked as one unit, not split into "&lt;" + the bare, unprotected tag name + "&gt;"
   /&(?:[a-zA-Z][a-zA-Z0-9]*|#\d+|#x[0-9a-fA-F]+);/.source, // &nbsp; &#39;
   /https?:\/\/[^\s<>"']*[^\s<>"'.,;:!?)\]]/.source, // URLs
   /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/.source, // e-mail addresses

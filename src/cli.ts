@@ -388,6 +388,7 @@ async function cmdCheck(argv: string[]): Promise<number> {
   }
 
   let identicalTotal = 0;
+  let orphanedTotal = 0;
   for (const loc of result.locales) {
     for (const issue of result.issues.filter((i) => i.locale === loc.locale)) {
       const target = rel(issue.target);
@@ -401,14 +402,20 @@ async function cmdCheck(argv: string[]): Promise<number> {
         log(`✗ ${loc.locale}: ${target} "${issue.path}" has a broken plural/select — missing "other" or unbalanced braces`);
       } else if (issue.kind === "stale") {
         log(`✗ ${loc.locale}: ${target} "${issue.path}" is stale — the ${fromTag} source changed since this was last translated`);
+      } else if (issue.kind === "orphan-key") {
+        log(`⚠ ${loc.locale}: ${target} "${issue.path}" has no ${fromTag} source anymore — the key was deleted or renamed`);
       } else {
         log(`⚠ ${loc.locale}: ${target} "${issue.path}" is untouched, identical to the ${fromTag} source`);
       }
     }
     identicalTotal += loc.identical;
+    orphanedTotal += loc.orphaned;
     if (loc.ok) log(`✓ ${loc.locale}${loc.identical ? ` (${loc.identical} left identical to ${fromTag})` : ""}`);
   }
   if (identicalTotal) log(`\n${identicalTotal} string${identicalTotal === 1 ? "" : "s"} left identical to the source — not a failure, but worth a look.`);
+  if (orphanedTotal) {
+    log(`${orphanedTotal} key${orphanedTotal === 1 ? "" : "s"} orphaned by a deleted/renamed source key — not a failure, but consider removing them.`);
+  }
   return result.ok ? 0 : 1;
 }
 

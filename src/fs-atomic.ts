@@ -15,7 +15,7 @@ import path from "node:path";
  * `EPERM`/`EBUSY` on Windows when an editor or antivirus scan has `file` open —
  * rather than leaving it behind forever.
  */
-export function writeFileAtomic(file: string, data: string): void {
+export function writeFileAtomic(file: string, data: string | Buffer): void {
   const tmp = path.join(path.dirname(file), `.${path.basename(file)}.tmp-${process.pid}-${crypto.randomBytes(4).toString("hex")}`);
   fs.writeFileSync(tmp, data);
   try {

@@ -80,6 +80,7 @@ const CANDIDATES = [
   "app/i18n",
   "static/locales",
   "config/locales",
+  "lib/l10n",
   "app/src/main/res",
   "src/main/res",
   "res",
@@ -212,11 +213,26 @@ export function detectLayout(cwd: string, from: string, input?: string): Layout 
   );
 }
 
+/** True when `dir` directly contains at least one file with a tracked locale extension (not a deeper, unrelated nested one). */
+function hasLocaleFileDirectlyIn(dir: string): boolean {
+  return fs.readdirSync(dir, { withFileTypes: true }).some((e) => e.isFile() && EXTENSIONS.includes(path.extname(e.name).toLowerCase()));
+}
+
 /**
  * Scans the same candidate roots `detectLayout` just searched for `from`, for any OTHER
  * tag that looks like a locale and actually has content — so a non-English-source project
  * (the single most common reason this error fires) gets pointed at the right `--from`
  * instead of just being told what wasn't found.
+ *
+ * Checks only directly inside the candidate directory itself (`hasLocaleFileDirectlyIn`),
+ * not a full recursive `listLocaleFiles` scan: `parseLocale`'s shape-only check (any
+ * 2-3 letter name) makes `looksLikeLocale` pass for plenty of ordinary project folder
+ * names too — confirmed: Flutter's own top-level `lib/` happened to contain, several
+ * levels deep, an unrelated `lib/l10n/app_en.arb`, so a full recursive scan suggested
+ * `--from lib`. A genuine per-locale directory almost always has at least one file
+ * directly inside it even when it also has nested subdirectories (see `layoutAt`'s own
+ * `listLocaleFiles(dir).length > 0` check, which only ever runs on a path this function
+ * is about to suggest, not on an arbitrary unrelated ancestor).
  */
 function detectAlternateLocale(cwd: string, from: string): string | undefined {
   for (const c of CANDIDATES) {
@@ -225,7 +241,7 @@ function detectAlternateLocale(cwd: string, from: string): string | undefined {
     for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
       if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
       if (entry.isDirectory()) {
-        if (entry.name !== from && looksLikeLocale(entry.name) && listLocaleFiles(path.join(root, entry.name)).length > 0) {
+        if (entry.name !== from && looksLikeLocale(entry.name) && hasLocaleFileDirectlyIn(path.join(root, entry.name))) {
           return entry.name;
         }
         continue;
@@ -342,15 +358,24 @@ export function existingTargets(layout: Layout, from: string): string[] {
     .sort();
 }
 
+/** A locale file's byte-level text encoding, detected from its leading BOM (or lack of one). */
+export type TextEncoding = "utf16le-bom" | "utf16be-bom" | "utf8";
+
 /**
- * Decodes a locale file's raw bytes to text, detecting a UTF-16 BOM first — Xcode's
- * traditional default for `.strings` files, which `fs.readFileSync(file, "utf8")`
- * would otherwise mangle into unreadable text (and then "no entries found").
+ * Sniffs `buf`'s encoding from a leading BOM — Xcode's traditional default for
+ * `.strings` files is UTF-16 (either byte order), which plain UTF-8 decoding would
+ * otherwise mangle into unreadable text (and then "no entries found").
  */
-function readText(file: string): string {
-  const buf = fs.readFileSync(file);
-  if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) return buf.subarray(2).toString("utf16le");
-  if (buf.length >= 2 && buf[0] === 0xfe && buf[1] === 0xff) {
+export function detectEncoding(buf: Buffer): TextEncoding {
+  if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) return "utf16le-bom";
+  if (buf.length >= 2 && buf[0] === 0xfe && buf[1] === 0xff) return "utf16be-bom";
+  return "utf8";
+}
+
+/** Decodes `buf` as `enc` (see `detectEncoding`), stripping the BOM. */
+export function decodeText(buf: Buffer, enc: TextEncoding): string {
+  if (enc === "utf16le-bom") return buf.subarray(2).toString("utf16le");
+  if (enc === "utf16be-bom") {
     const swapped = Buffer.alloc(buf.length - 2);
     for (let i = 2; i + 1 < buf.length; i += 2) {
       swapped[i - 2] = buf[i + 1];
@@ -359,6 +384,30 @@ function readText(file: string): string {
     return swapped.toString("utf16le");
   }
   return buf.toString("utf8").replace(/^﻿/, "");
+}
+
+/**
+ * Re-encodes `text` as `enc`, the inverse of `decodeText` — used to write a target
+ * file back in whatever encoding it already had (a UTF-16 `.strings` file is never
+ * silently rewritten as UTF-8 just because this tool only ever produces JS strings
+ * internally). `enc === "utf8"` returns a plain string, so a caller that never deals
+ * with another encoding sees no change in type.
+ */
+export function encodeText(text: string, enc: TextEncoding): string | Buffer {
+  if (enc === "utf8") return text;
+  const body = Buffer.from(text, "utf16le");
+  if (enc === "utf16le-bom") return Buffer.concat([Buffer.from([0xff, 0xfe]), body]);
+  const swapped = Buffer.alloc(body.length);
+  for (let i = 0; i + 1 < body.length; i += 2) {
+    swapped[i] = body[i + 1];
+    swapped[i + 1] = body[i];
+  }
+  return Buffer.concat([Buffer.from([0xfe, 0xff]), swapped]);
+}
+
+function readText(file: string): string {
+  const buf = fs.readFileSync(file);
+  return decodeText(buf, detectEncoding(buf));
 }
 
 /**
@@ -373,7 +422,7 @@ export function readLocaleDoc(file: string, tag: string, isSource = false, fuzzy
   const text = readText(file);
   const ext = path.extname(file).toLowerCase();
   if (ext === ".yaml" || ext === ".yml") return readYamlDoc(file, text, tag);
-  if (ext === ".po" || ext === ".pot") return readPoDoc(file, text, isSource, fuzzy);
+  if (ext === ".po" || ext === ".pot") return readPoDoc(file, text, isSource, fuzzy, tag);
   if (ext === ".arb") return readArbDoc(file, text);
   if (ext === ".strings") return readStringsDoc(file, text);
   if (ext === ".properties") return readPropertiesDoc(file, text);
@@ -396,6 +445,20 @@ export function readLocaleDoc(file: string, tag: string, isSource = false, fuzzy
 const needsTranslation = (existing: unknown, source: string, overwrite: boolean) =>
   overwrite || typeof existing !== "string" || (existing === "" && source !== "");
 
+/**
+ * Joins `key` onto a dotted path (the convention every key path in this file uses,
+ * for the lock file, `check`, and `doNotTranslateKeys`), escaping a literal `.`
+ * within the key itself first — rare, but legal in JSON/YAML/`.properties`. Without
+ * this, a flat key `"a.b"` and a nested `"a": {"b": ...}` produce the exact same
+ * path string `"a.b"`, and the lock file (keyed by this string) can't tell them
+ * apart: whichever is recorded last overwrites the other's entry, leaving it
+ * permanently "stale" and re-translated every run.
+ */
+function joinPath(path: string, key: string): string {
+  const escaped = key.replace(/\\/g, "\\\\").replace(/\./g, "\\.");
+  return path ? `${path}.${escaped}` : escaped;
+}
+
 /** Flattens a locale tree into key-path -> string-value pairs (for `locale-ai check`). */
 export function flattenStrings(
   data: unknown,
@@ -404,7 +467,7 @@ export function flattenStrings(
 ): Array<{ path: string; value: string }> {
   if (typeof data === "string") out.push({ path: prefix || "(root)", value: data });
   else if (Array.isArray(data)) data.forEach((v, i) => flattenStrings(v, `${prefix}[${i}]`, out));
-  else if (isObj(data)) for (const k of Object.keys(data)) flattenStrings(data[k], prefix ? `${prefix}.${k}` : k, out);
+  else if (isObj(data)) for (const k of Object.keys(data)) flattenStrings(data[k], joinPath(prefix, k), out);
   return out;
 }
 
@@ -452,7 +515,7 @@ export function pendingEntries(
     } else if (Array.isArray(s)) {
       s.forEach((v, i) => visit(v, Array.isArray(e) ? e[i] : undefined, `${path}[${i}]`));
     } else if (isObj(s)) {
-      for (const k of Object.keys(s)) visit(s[k], isObj(e) ? e[k] : undefined, path ? `${path}.${k}` : k);
+      for (const k of Object.keys(s)) visit(s[k], isObj(e) ? e[k] : undefined, joinPath(path, k));
     }
   };
   visit(source, existing, "");
@@ -473,7 +536,11 @@ export function pendingStrings(
 /**
  * Builds the target document: source structure and key order, existing
  * translations kept (unless overwrite or stale), new strings from `translate`,
- * and keys that only exist in the target preserved at the end. A string at a
+ * and keys that only exist in the target preserved at the end — UNLESS `isOrphaned`
+ * says this tool put them there for a source key that's since been deleted or
+ * renamed, in which case they're dropped instead of lingering forever (see
+ * `isPluralCategoryPath`, which `isOrphaned`'s caller uses so a normal derived
+ * plural category is never mistaken for one of these and pruned). A string at a
  * protected path (see keyPathProtect) is always copied from the source
  * verbatim. `isStale` (see the lock module) forces re-translation of a
  * non-empty target when its source string has changed since it was last
@@ -486,6 +553,7 @@ export function buildTarget(
   overwrite: boolean,
   isProtected?: (path: string) => boolean,
   isStale?: (path: string, source: string) => boolean,
+  isOrphaned?: (path: string) => boolean,
 ): unknown {
   const visit = (s: unknown, e: unknown, path: string): unknown => {
     if (typeof s === "string") {
@@ -495,8 +563,8 @@ export function buildTarget(
     if (Array.isArray(s)) return s.map((v, i) => visit(v, Array.isArray(e) ? e[i] : undefined, `${path}[${i}]`));
     if (isObj(s)) {
       const out = newObj();
-      for (const k of Object.keys(s)) out[k] = visit(s[k], isObj(e) ? e[k] : undefined, path ? `${path}.${k}` : k);
-      if (isObj(e)) for (const k of Object.keys(e)) if (!(k in out)) out[k] = e[k];
+      for (const k of Object.keys(s)) out[k] = visit(s[k], isObj(e) ? e[k] : undefined, joinPath(path, k));
+      if (isObj(e)) for (const k of Object.keys(e)) if (!(k in out) && !isOrphaned?.(joinPath(path, k))) out[k] = e[k];
       return out;
     }
     return s;
@@ -505,13 +573,19 @@ export function buildTarget(
 }
 
 const PLURAL_KEY = /^(.+?)(_ordinal)?_(zero|one|two|few|many|other)$/;
+/** gettext's own flat plural-slot keys (po.ts's `pluralOneKey`/`pluralOtherKey`): `<msgid>\u0005one`/`\u0005other`, a separator no real msgid contains. */
+const PO_PLURAL_ONE_KEY = /\u0005one$/;
 
 /**
- * Source strings at a cardinal i18next "_one" plural key ("itemCount_one": "{{count}}
- * item"). These are grammatically singular in English, but the model sometimes infers
- * the TARGET's plural form anyway because {{count}} reads as an opaque marker rather
- * than a concrete number — the engine uses this set to retranslate with a real "1" in
- * place of {{count}} and recover the correct grammatical number (see engine.ts).
+ * Source strings at a cardinal "one" plural slot — either i18next's flat suffix key
+ * ("itemCount_one": "{{count}} item"), gettext's own `\u0005one` slot (po.ts), or a
+ * nested Rails/Android-style `{one: ..., other: ...}` group (the same shape
+ * `addNestedPluralForms` recognizes as a plural group, covering YAML/JSON nested
+ * plurals and Android's `<plurals>`). All three are grammatically singular in
+ * English, but the model sometimes infers the TARGET's plural form anyway because the
+ * masked count marker (`{{count}}`, `%d`, `#`) carries no number of its own — the
+ * engine uses this set to retranslate with a real "1" in its place and recover the
+ * correct grammatical number (see engine.ts).
  */
 export function pluralOneStrings(data: unknown, out: Set<string> = new Set()): Set<string> {
   const visit = (v: unknown): void => {
@@ -520,14 +594,41 @@ export function pluralOneStrings(data: unknown, out: Set<string> = new Set()): S
       return;
     }
     if (!isObj(v)) return;
-    for (const k of Object.keys(v)) {
+    const keys = Object.keys(v);
+    const isNestedGroup = keys.length >= 2 && keys.includes("other") && keys.every((k) => CATEGORIES.includes(k) && typeof v[k] === "string");
+    if (isNestedGroup) {
+      if (typeof v.one === "string") out.add(v.one);
+      return;
+    }
+    for (const k of keys) {
       const m = PLURAL_KEY.exec(k);
-      if (m && !m[2] && m[3] === "one" && typeof v[k] === "string") out.add(v[k] as string);
+      if ((m && !m[2] && m[3] === "one" && typeof v[k] === "string") || (PO_PLURAL_ONE_KEY.test(k) && typeof v[k] === "string")) {
+        out.add(v[k] as string);
+      }
       visit(v[k]);
     }
   };
   visit(data);
   return out;
+}
+
+/**
+ * True when `path` is a plural-category leaf that's still legitimately derived from
+ * the CURRENT source — a nested `{one, other, ...}` group whose own "other" sibling
+ * is still a literal source path, or a flat i18next `<base>_<category>` suffix whose
+ * `<base>_other` is still one. A plural category (`_few`, `.two`, ...) is expected to
+ * be absent from the source itself (only the "one"/"other" the source actually needs
+ * ever are, per `addPluralForms`/`addNestedPluralForms`), so a plain "not in source"
+ * test can't tell this apart from a key whose source has genuinely been deleted or
+ * renamed — used by both `check`'s "orphan-key" issue and `buildTarget`'s pruning so
+ * neither mistakes a normal derived category for one.
+ */
+export function isPluralCategoryPath(path: string, srcPaths: Set<string>): boolean {
+  const lastDot = path.lastIndexOf(".");
+  const lastSeg = lastDot === -1 ? path : path.slice(lastDot + 1);
+  if (CATEGORIES.includes(lastSeg) && srcPaths.has(lastDot === -1 ? "other" : `${path.slice(0, lastDot)}.other`)) return true;
+  const m = PLURAL_KEY.exec(path);
+  return !!m && srcPaths.has(`${m[1]}${m[2] ?? ""}_other`);
 }
 
 /**
@@ -619,7 +720,7 @@ export function addPluralForms(doc: unknown, targetLang: string, opts: PluralSyn
     for (const k of keys) {
       const id = groupOf.get(k);
       if (id === undefined) {
-        out[k] = visit(v[k], path ? `${path}.${k}` : k);
+        out[k] = visit(v[k], joinPath(path, k));
         continue;
       }
       if (emitted.has(id)) continue;
@@ -627,13 +728,13 @@ export function addPluralForms(doc: unknown, targetLang: string, opts: PluralSyn
       const g = groups.get(id)!;
       const otherKey = g.cats.get("other")!;
       const other = v[otherKey] as string;
-      const otherPath = path ? `${path}.${otherKey}` : otherKey;
+      const otherPath = joinPath(path, otherKey);
       const refresh = opts.otherStale?.(otherPath) ?? false;
       for (const cat of CATEGORIES) {
         const existing = g.cats.get(cat);
         if (existing) {
           out[existing] = v[existing];
-          const existingPath = path ? `${path}.${existing}` : existing;
+          const existingPath = joinPath(path, existing);
           if (cat === "other" || opts.hasSource?.(existingPath)) continue;
           const current = v[existing] as string;
           if (opts.isEdited?.(existingPath, current)) {
@@ -647,7 +748,7 @@ export function addPluralForms(doc: unknown, targetLang: string, opts: PluralSyn
           const newKey = `${id}_${cat}`;
           out[newKey] = other;
           added++;
-          derived.push({ path: path ? `${path}.${newKey}` : newKey, value: other });
+          derived.push({ path: joinPath(path, newKey), value: other });
         }
       }
     }
@@ -677,7 +778,7 @@ export function addNestedPluralForms(doc: unknown, targetLang: string, opts: Plu
       keys.length >= 2 && keys.includes("other") && keys.every((k) => CATEGORIES.includes(k) && typeof v[k] === "string");
     if (!isGroup) {
       const out = newObj();
-      for (const k of keys) out[k] = visit(v[k], path ? `${path}.${k}` : k);
+      for (const k of keys) out[k] = visit(v[k], joinPath(path, k));
       return out;
     }
     let needed: string[];
@@ -687,13 +788,13 @@ export function addNestedPluralForms(doc: unknown, targetLang: string, opts: Plu
       needed = keys;
     }
     const other = v.other as string;
-    const otherPath = path ? `${path}.other` : "other";
+    const otherPath = joinPath(path, "other");
     const refresh = opts.otherStale?.(otherPath) ?? false;
     const out = newObj();
     for (const cat of CATEGORIES) {
       if (keys.includes(cat)) {
         out[cat] = v[cat];
-        const catPath = path ? `${path}.${cat}` : cat;
+        const catPath = joinPath(path, cat);
         if (cat === "other" || opts.hasSource?.(catPath)) continue;
         const current = v[cat] as string;
         if (opts.isEdited?.(catPath, current)) {
@@ -706,7 +807,7 @@ export function addNestedPluralForms(doc: unknown, targetLang: string, opts: Plu
       } else if (needed.includes(cat)) {
         out[cat] = other;
         added++;
-        derived.push({ path: path ? `${path}.${cat}` : cat, value: other });
+        derived.push({ path: joinPath(path, cat), value: other });
       }
     }
     return out;

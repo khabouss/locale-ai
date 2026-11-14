@@ -14,6 +14,21 @@ function xcstringsSkip(entry: unknown): boolean {
   return !isObj(entry) || entry.shouldTranslate === false || entry.substitutions !== undefined || xcstringsHasDeviceVariant(entry);
 }
 
+/**
+ * `JSON.stringify`'s pretty-printer writes `"key": value`; Xcode's own serializer
+ * writes `"key" : value` (a space before the colon too), so every entry this tool
+ * touches — and, since whitespace is otherwise preserved byte-for-byte, every entry
+ * it DOESN'T touch too, once the rest of the file is rewritten around it — showed up
+ * in the diff on every single run, translated or not. A pretty-printed key is always
+ * the first non-whitespace token on its own line, immediately followed by `:` (a
+ * string VALUE at the start of its own line, inside an array, never has a trailing
+ * colon) — safe to match and space without touching anything inside a string's own
+ * text.
+ */
+function xcodeColonSpacing(s: string): string {
+  return s.replace(/^(\s*"(?:[^"\\]|\\.)*")(:)/gm, "$1 $2");
+}
+
 /** An entry's value for one locale: a plain string, a `{zero,one,...}` plural object, or undefined if untranslated. */
 function xcstringsValue(entry: Obj, tag: string): unknown {
   const loc = (entry.localizations as Obj | undefined)?.[tag] as Obj | undefined;
@@ -104,7 +119,7 @@ export function readXcstringsDoc(file: string, text: string, tag: string, isSour
         locs[targetTag] = { stringUnit: { state: "translated", value: newVal } };
       }
     }
-    return withNewline(JSON.stringify(out, null, indent), keepNewline);
+    return withNewline(xcodeColonSpacing(JSON.stringify(out, null, indent)), keepNewline);
   };
   return { data, serialize };
 }

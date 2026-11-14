@@ -23,12 +23,12 @@ export interface EngineOptions {
   protect?: RegExp;
   /** Whole-string glossary; a hit skips the model. */
   lookup?: (s: string) => string | undefined;
-  /** Source strings at a cardinal i18next "_one" plural key (see locales.ts's pluralOneStrings). */
+  /** Source strings at a cardinal "one" plural slot, any format (see locales.ts's pluralOneStrings). */
   singularHints?: Set<string>;
   onProgress?: (done: number, total: number) => void;
 }
 
-export type IssueKind = "placeholder-fallback" | "suspicious-length" | "repetition" | "edited" | "conflict";
+export type IssueKind = "placeholder-fallback" | "suspicious-length" | "repetition" | "empty-tag" | "edited" | "conflict";
 
 export interface Issue {
   source: string;
@@ -191,8 +191,21 @@ async function attempt(
     failed.push(...units.filter((u) => !numericStyleSafe(u.text)));
     units = units.filter((u) => numericStyleSafe(u.text));
   }
+  // A "natural"-style open/close tag pair (<1>...</1>) whose own numbered id a model
+  // seems to learn as its own kind of do-not-translate marker, similar to {0} — the
+  // content between them disappearing entirely ("<a href=...>here</a>" -> an empty
+  // link) has been observed on a real hop even though the surrounding sentence
+  // translates fine. Only flagged when the source itself wasn't already an
+  // intentionally empty pair.
+  const EMPTY_TAG_RE = /<(\d+)>\s*<\/\1>/;
   const suspicionKind = (src: string, o: string): IssueKind | undefined =>
-    o.length > 3 * src.length + 20 ? "suspicious-length" : /(\b\p{L}+\b)(?:\W+\1\b){3,}/u.test(o) ? "repetition" : undefined;
+    o.length > 3 * src.length + 20
+      ? "suspicious-length"
+      : /(\b\p{L}+\b)(?:\W+\1\b){3,}/u.test(o)
+        ? "repetition"
+        : EMPTY_TAG_RE.test(o) && !EMPTY_TAG_RE.test(src)
+          ? "empty-tag"
+          : undefined;
 
   const jobs = units.map((unit) => {
     const masked = mask(unit.text, style, opts.protect);
@@ -332,19 +345,19 @@ async function splitFallback(
   }
 }
 
-const COUNT_PLACEHOLDER = /\{\{\s*count\s*\}\}/;
-
 /**
- * A "_one" key's source is grammatically singular ("You have {{count}} file"), but the
- * masked marker that stands in for {{count}} carries no number of its own, so the model
- * sometimes still produces the target's PLURAL noun form (confirmed: en→fr "fileCount_one"
- * came back "Vous avez {{count}} fichiers"). Retranslating with a literal "1" in place of
- * {{count}} gives the model the real grammatical cue; only applied when {{count}} is the
- * string's only placeholder (anything else needs the normal masking pipeline to survive),
- * and only kept when exactly one standalone "1" survives translation — a source string that
- * already had its own unrelated literal "1" ("{{count}} of 1 total") would otherwise risk
- * restoring the wrong occurrence if translation reordered the two, silently freezing the
- * actual count as a literal "1" and corrupting the unrelated one into {{count}} instead.
+ * A cardinal "one" slot's source is grammatically singular ("You have {{count}} file",
+ * Android's "%d file", gettext's "%d file"), but the masked marker that stands in for
+ * its count placeholder ({{count}}, %d, #, ...) carries no number of its own, so the
+ * model sometimes still produces the target's PLURAL noun form (confirmed: en→fr
+ * "fileCount_one" came back "Vous avez {{count}} fichiers"). Retranslating with a
+ * literal "1" in the placeholder's place gives the model the real grammatical cue;
+ * only applied when that placeholder is the string's only one (anything else needs the
+ * normal masking pipeline to survive), and only kept when exactly one standalone "1"
+ * survives translation — a source string that already had its own unrelated literal
+ * "1" ("{{count}} of 1 total") would otherwise risk restoring the wrong occurrence if
+ * translation reordered the two, silently freezing the actual count as a literal "1"
+ * and corrupting the unrelated one into the placeholder instead.
  *
  * All qualifying keys are retranslated in one `runModels` call (which itself batches by
  * `opts.batchSize`), not one model call per key — a project with hundreds of plural keys
@@ -365,15 +378,16 @@ async function fixSingularGrammar(
     // doNotTranslate match is present alongside the count placeholder, `tokens`
     // has more than one entry and this retry is skipped, same as any other
     // string too complex for this narrow single-placeholder rewrite. Once eligible,
-    // the count placeholder IS the only masked span, so building `pinned` from the
-    // original `s` (never from `masked.text`, whose span is already a generic
-    // `{0}`-style marker, not the `{{count}}` text `COUNT_PLACEHOLDER` matches) is
-    // already safe — there is nothing else in `s` to leak.
+    // that single token IS the count placeholder, whatever its own shape, and it
+    // appears in `s` exactly once (masking would have produced a second token for a
+    // second occurrence) — safe to locate with a plain `indexOf` and pin to "1".
     const tokens = mask(s, "natural", opts.protect).tokens;
-    if (tokens.length !== 1 || !COUNT_PLACEHOLDER.test(tokens[0])) continue;
-    const m = COUNT_PLACEHOLDER.exec(s)!;
-    const pinned = s.slice(0, m.index) + "1" + s.slice(m.index + m[0].length);
-    jobs.push({ source: s, pinned, prepared: prepare(pinned), marker: m[0] });
+    if (tokens.length !== 1) continue;
+    const marker = tokens[0];
+    const index = s.indexOf(marker);
+    if (index < 0) continue;
+    const pinned = s.slice(0, index) + "1" + s.slice(index + marker.length);
+    jobs.push({ source: s, pinned, prepared: prepare(pinned), marker });
   }
   if (!jobs.length) return;
   const outputs = await runModels(new Set(jobs.map((j) => j.prepared)), hops, opts, progress);

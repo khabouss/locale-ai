@@ -10,15 +10,20 @@ import { translateStrings } from "../src/engine.ts";
 import { extractIcu } from "../src/icu.ts";
 import { extractPipePlural } from "../src/vue-plural.ts";
 import { parseLocale } from "../src/lang.ts";
-import { editedPaths, hashOf, isEdited, isSourceStale, loadLock, pruneDeletedKeys, recordEntries, saveLock } from "../src/lock.ts";
+import { editedPaths, hashOf, isEdited, isSourceStale, loadLock, lockedPathsFor, pruneDeletedKeys, recordEntries, saveLock } from "../src/lock.ts";
 import {
   addNestedPluralForms,
   addPluralForms,
   buildTarget,
+  decodeText,
+  detectEncoding,
   detectLayout,
+  encodeText,
   existingTargets,
   flattenStrings,
+  isPluralCategoryPath,
   keyPathProtect,
+  pendingEntries,
   pendingStrings,
   pluralOneStrings,
   readLocaleDoc,
@@ -26,6 +31,7 @@ import {
   targetFile,
   usesI18nextPlurals,
 } from "../src/locales.ts";
+import { check, translate } from "../src/api.ts";
 import type { Translator } from "../src/models.ts";
 import { hasTranslatableText, mask, unmask } from "../src/placeholders.ts";
 import { splitSentences } from "../src/segment.ts";
@@ -62,6 +68,10 @@ test("mask protects common placeholder syntaxes", () => {
     // restructuring the sentence the way the target language needs.
     ["{name}’s profile was updated.", ["{name}"]],
     ["“{0}' trailing", ["{0}"]],
+    // XLIFF/.resx text that documents a tag literally (already entity-escaped in the
+    // XML itself) — masked as one unit, not split into "&lt;" + a bare, unprotected
+    // tag name + "&gt;" by the generic entity-reference pattern below it.
+    ["Use &lt;b&gt; tags to bold text.", ["&lt;b&gt;"]],
   ];
   for (const [input, expected] of cases) {
     assert.deepEqual(mask(input).tokens, expected, input);
@@ -232,6 +242,62 @@ test("pendingStrings/buildTarget: isStale forces re-translation of a non-empty t
   assert.equal(JSON.stringify(built), JSON.stringify({ a: "[Hello]", b: "Monde" }));
 });
 
+test("buildTarget: isOrphaned drops a target-only key/subtree instead of preserving it forever", () => {
+  const src = { a: "Hello" };
+  const existing = { a: "Bonjour", deleted: "Was a source key once", group: { deleted: "Whole subtree gone" }, kept: "Never consulted" };
+  const isOrphaned = (p: string) => p === "deleted" || p === "group";
+  const built = buildTarget(src, existing, (s) => s, false, undefined, undefined, isOrphaned);
+  assert.equal(JSON.stringify(built), JSON.stringify({ a: "Bonjour", kept: "Never consulted" }));
+});
+
+test("isPluralCategoryPath: recognizes a nested group's and a flat i18next suffix's category siblings, not an unrelated key", () => {
+  const srcPaths = new Set(["group.one", "group.other", "fileCount_one", "fileCount_other", "plain"]);
+  assert.equal(isPluralCategoryPath("group.few", srcPaths), true, "nested sibling of a still-present group");
+  assert.equal(isPluralCategoryPath("fileCount_few", srcPaths), true, "flat suffix sibling of a still-present base");
+  assert.equal(isPluralCategoryPath("plain", srcPaths), false, "an ordinary key is never mistaken for a category");
+  assert.equal(isPluralCategoryPath("removedGroup.few", srcPaths), false, "no surviving \"other\" sibling: not a category, not protected");
+  assert.equal(isPluralCategoryPath("removedCount_few", srcPaths), false, "same, flat style");
+});
+
+test("check/translate: a deleted/renamed source key is reported by check and pruned by translate, but a never-tracked target-only key is left alone", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-orphan-"));
+  fs.mkdirSync(path.join(dir, "locales"));
+  fs.writeFileSync(path.join(dir, "locales/en.json"), JSON.stringify({ greeting: "Hello", farewell: "Goodbye" }));
+  fs.writeFileSync(
+    path.join(dir, "locales/fr.json"),
+    JSON.stringify({ greeting: "FR:Hello", farewell: "FR:Goodbye", deprecated_key: "FR:removed from source", manual_key: "Never a source key" }),
+  );
+  // Only "deprecated_key" was ever recorded by this tool (source hash/written hash both
+  // real) — "manual_key" has no lock entry at all, the same as a key someone added by hand.
+  fs.writeFileSync(
+    path.join(dir, "locales/locale-ai.lock.json"),
+    JSON.stringify({
+      version: 3,
+      entries: {
+        "en.json#greeting": { fr: `${hashOf("Hello")}:${hashOf("FR:Hello")}` },
+        "en.json#farewell": { fr: `${hashOf("Goodbye")}:${hashOf("FR:Goodbye")}` },
+        "en.json#deprecated_key": { fr: `${hashOf("anything")}:${hashOf("FR:removed from source")}` },
+      },
+    }),
+  );
+
+  // check reports every target-only key regardless of lock history — it never writes
+  // anything, so being inclusive here is only informational, not destructive.
+  const checked = await check({ cwd: dir, from: "en" });
+  assert.equal(checked.locales[0]!.orphaned, 2);
+  assert.deepEqual(
+    checked.issues.filter((i) => i.kind === "orphan-key").map((i) => (i as { path: string }).path).toSorted(),
+    ["deprecated_key", "manual_key"],
+  );
+
+  // translate only prunes what IT tracked in the lock as coming from a now-vanished
+  // source key — "manual_key" was never this tool's to begin with, so it's left alone.
+  const translated = await translate({ cwd: dir, from: "en", to: "fr" });
+  assert.equal(translated.locales[0]!.stringsTranslated, 0, "both real keys already translated and non-stale: no model needed");
+  const after = JSON.parse(fs.readFileSync(path.join(dir, "locales/fr.json"), "utf8"));
+  assert.deepEqual(after, { greeting: "FR:Hello", farewell: "FR:Goodbye", manual_key: "Never a source key" });
+});
+
 test("pendingStrings/buildTarget: a legitimately empty source string is not perpetually re-translated", () => {
   // Regression: needsTranslation used to treat any empty-string target as
   // unfinished, even when the source itself is "" (so the target is already
@@ -290,6 +356,21 @@ test("lock: a source edit is detected as stale; a translator edit is flagged, no
   assert.deepEqual(loadLock(file), lock);
   assert.equal(hashOf("x"), hashOf("x"));
   assert.notEqual(hashOf("x"), hashOf("y"));
+});
+
+test("lockedPathsFor: every leaf path this tool previously translated, for one file and locale", () => {
+  const lock = loadLock(path.join(fs.mkdtempSync(path.join(os.tmpdir(), "lai-lockedpaths-")), "locale-ai.lock.json"));
+  recordEntries(lock, "en.json", "fr", [
+    { path: "greeting", source: "Hello", written: "Bonjour" },
+    { path: "farewell", source: "Goodbye", written: "Au revoir" },
+  ]);
+  recordEntries(lock, "en.json", "es", [{ path: "greeting", source: "Hello", written: "Hola" }]);
+  recordEntries(lock, "other.json", "fr", [{ path: "greeting", source: "Hi", written: "Salut" }]);
+
+  assert.deepEqual(lockedPathsFor(lock, "en.json", "fr"), new Set(["greeting", "farewell"]));
+  assert.deepEqual(lockedPathsFor(lock, "en.json", "es"), new Set(["greeting"]));
+  assert.deepEqual(lockedPathsFor(lock, "en.json", "de"), new Set(), "a locale never translated has no locked paths");
+  assert.deepEqual(lockedPathsFor(lock, "other.json", "fr"), new Set(["greeting"]), "a different file's entries are never mixed in");
 });
 
 test("lock: two concurrent processes translating different locales both keep their lock history (no lost update)", async () => {
@@ -549,6 +630,22 @@ test("pluralOneStrings: finds cardinal _one values, ignores ordinals and other c
   assert.deepEqual(pluralOneStrings(doc), new Set(["{{count}} item", "You have {{count}} file"]));
 });
 
+test("pluralOneStrings: also finds a nested {one, other} plural group (Rails YAML/Android <plurals>) and gettext's \\u0005one slot", () => {
+  // Neither shape uses the i18next "_one" suffix convention: a nested group (what
+  // addNestedPluralForms also recognizes, and what android-xml.ts produces for a
+  // <plurals> element) has no "_one" key at all, and po.ts's own flat plural keys use
+  // a "\u0005one" separator instead of an underscore. Both were previously invisible
+  // to pluralOneStrings, so Android/.po/Rails-YAML singular plurals never got the
+  // literal-"1" grammar retry engine.ts gives i18next's "_one" keys.
+  const doc = {
+    file_count: { one: "%d file", other: "%d files" },
+    "\u0004file\u0005one": "%d file",
+    "\u0004file\u0005other": "%d files",
+    plain: "not a plural key",
+  };
+  assert.deepEqual(pluralOneStrings(doc), new Set(["%d file"]));
+});
+
 test("detects dir and file layouts", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-"));
   fs.mkdirSync(path.join(root, "src/locales/en/admin"), { recursive: true });
@@ -592,6 +689,10 @@ test("Flutter's app_<locale>.arb filename prefix is detected, auto and via --inp
   fs.writeFileSync(path.join(root, "lib/l10n/app_en.arb"), '{"@@locale": "en", "hello": "Hi"}');
   fs.writeFileSync(path.join(root, "lib/l10n/app_fr.arb"), '{"@@locale": "fr", "hello": "Salut"}');
 
+  // No --input at all: lib/l10n is Flutter's own default, listed among the auto-detected candidates.
+  const auto = detectLayout(root, "en");
+  assert.deepEqual(auto, { kind: "file", root: path.join(root, "lib/l10n"), ext: ".arb", prefix: "app" });
+
   const l = detectLayout(root, "en", "lib/l10n");
   assert.deepEqual(l, { kind: "file", root: path.join(root, "lib/l10n"), ext: ".arb", prefix: "app" });
   assert.deepEqual(existingTargets(l, "en"), ["fr"]);
@@ -600,6 +701,17 @@ test("Flutter's app_<locale>.arb filename prefix is detected, auto and via --inp
   // Pointing --input directly at the source file itself also resolves it.
   const direct = detectLayout(root, "en", "lib/l10n/app_en.arb");
   assert.deepEqual(direct, { kind: "file", root: path.join(root, "lib/l10n"), ext: ".arb", prefix: "app" });
+});
+
+test("detectLayout: a Flutter project's unrelated top-level lib/ folder is never mistaken for a locale, even with --from wrong", () => {
+  // Regression: lib/ is Flutter's own source folder, not a locale directory — but its
+  // name happens to shape-match looksLikeLocale's loose 2-3-letter check, and before
+  // lib/l10n was an auto-detected candidate, a full recursive scan under "." found the
+  // unrelated lib/l10n/app_en.arb several levels down and wrongly suggested --from lib.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-flutter-nohint-"));
+  fs.mkdirSync(path.join(root, "lib/l10n"), { recursive: true });
+  fs.writeFileSync(path.join(root, "lib/l10n/app_en.arb"), '{"@@locale": "en", "hello": "Hi"}');
+  assert.throws(() => detectLayout(root, "de"), (e: Error) => !/did you mean --from lib/.test(e.message));
 });
 
 test("Apple's <locale>.lproj directory suffix is detected, auto and via --input", () => {
@@ -840,6 +952,60 @@ test("Android strings.xml: translatable='false' (single quotes) is honored, and 
   assert.equal(JSON.stringify(doc.data), JSON.stringify({ app_name: "My App" }));
 });
 
+test("Android strings.xml: several product-qualified variants sharing one name keep their own product attribute, not one duplicate pair", () => {
+  // <string name="title" product="tablet"> and product="default"> are two distinct,
+  // device-specific resources — keying purely by name collapsed them into whichever
+  // was read last and dropped the product attribute entirely, writing two identical
+  // <string name="title"> elements (a duplicate-resource error under aapt2).
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-android-product-"));
+  const file = path.join(dir, "strings.xml");
+  fs.writeFileSync(
+    file,
+    `<resources>
+    <string name="title" product="tablet">Welcome, tablet user</string>
+    <string name="title" product="default">Welcome</string>
+    <string name="subtitle">Single variant, unaffected</string>
+</resources>
+`,
+  );
+  const doc = readLocaleDoc(file, "en", true, false);
+  assert.equal(
+    JSON.stringify(doc.data),
+    JSON.stringify({ "title[tablet]": "Welcome, tablet user", "title[default]": "Welcome", subtitle: "Single variant, unaffected" }),
+  );
+  const out = doc.serialize({
+    "title[tablet]": "Bienvenue, utilisateur tablette",
+    "title[default]": "Bienvenue",
+    subtitle: "Variante unique, non affectée",
+  });
+  assert.match(out, /<string name="title" product="tablet">Bienvenue, utilisateur tablette<\/string>/);
+  assert.match(out, /<string name="title" product="default">Bienvenue<\/string>/);
+  // The single-variant string keeps its plain, unqualified key and no product attribute.
+  assert.match(out, /<string name="subtitle">Variante unique, non affectée<\/string>/);
+  assert.equal([...out.matchAll(/<string name="title"/g)].length, 2, "both variants must survive, not collapse into one");
+});
+
+test("Android strings.xml: formatted=\"false\" and tools:ignore survive a rewrite instead of being dropped", () => {
+  // The tag is rebuilt from scratch on every write, with only name/product/translatable
+  // handled explicitly — any other attribute (formatted="false", required once a value mixes
+  // a bare %s/%d with other text or aapt2's format check fails; tools:ignore, a lint
+  // suppression) was silently lost.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-android-attrs-"));
+  const file = path.join(dir, "strings.xml");
+  fs.writeFileSync(
+    file,
+    `<resources>
+    <string name="progress" formatted="false">%1$d%% complete, %2$s remaining</string>
+    <string name="ignored" tools:ignore="UnusedResources">Unused but kept</string>
+</resources>
+`,
+  );
+  const doc = readLocaleDoc(file, "en", true, false);
+  const out = doc.serialize({ progress: "FR:%1$d%% complete, %2$s remaining", ignored: "FR:Unused but kept" });
+  assert.match(out, /<string name="progress" formatted="false">FR:/);
+  assert.match(out, /<string name="ignored" tools:ignore="UnusedResources">FR:/);
+});
+
 test("Apple .xcstrings: source extraction skips shouldTranslate=false/device variants, falls back to the key itself", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-xcstrings-"));
   const file = path.join(dir, "Localizable.xcstrings");
@@ -946,6 +1112,50 @@ test("Apple .xcstrings: translating several locales in one run shares the file w
   assert.equal(final.strings.Settings.localizations.fr.stringUnit.state, "needs_review");
 });
 
+test("Apple .xcstrings: writes Xcode's own \"key\" : value colon spacing, so a no-op rerun is byte-identical", () => {
+  // JSON.stringify's pretty-printer writes "key": value; Xcode's own serializer
+  // writes "key" : value (a space before the colon too) — the mismatch alone used to
+  // put the whole file in the diff on every run, translated or not.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-xcstrings-colon-"));
+  const file = path.join(dir, "Localizable.xcstrings");
+  const text = [
+    "{",
+    '  "sourceLanguage" : "en",',
+    '  "strings" : {',
+    '    "Time: %@" : {',
+    '      "localizations" : {',
+    '        "en" : {',
+    '          "stringUnit" : {',
+    '            "state" : "translated",',
+    '            "value" : "Time: %@"',
+    "          }",
+    "        },",
+    '        "fr" : {',
+    '          "stringUnit" : {',
+    '            "state" : "translated",',
+    '            "value" : "FR:Time: %@"',
+    "          }",
+    "        }",
+    "      }",
+    "    }",
+    "  },",
+    '  "version" : "1.0"',
+    "}",
+    "",
+  ].join("\n");
+  fs.writeFileSync(file, text);
+
+  const doc = readLocaleDoc(file, "en", true);
+  const existing = readLocaleDoc(file, "fr").data;
+  assert.deepEqual(pendingStrings(doc.data, existing, false), [], "already translated: nothing pending");
+  const built = buildTarget(doc.data, existing, (s) => `[translated] ${s}`, false);
+  const out = doc.serialize(built, "fr", text);
+  assert.equal(out, text, "a no-op rerun reproduces Xcode's own colon spacing byte-for-byte");
+
+  // A colon inside a string's own text (not a JSON key-value separator) is never touched.
+  assert.match(out, /"value" : "FR:Time: %@"/);
+});
+
 test("flattenStrings: key paths for nested objects and arrays", () => {
   assert.deepEqual(flattenStrings({ a: "x", b: { c: "y" }, d: ["p", "q"] }), [
     { path: "a", value: "x" },
@@ -954,6 +1164,27 @@ test("flattenStrings: key paths for nested objects and arrays", () => {
     { path: "d[1]", value: "q" },
   ]);
   assert.deepEqual(flattenStrings("just a string"), [{ path: "(root)", value: "just a string" }]);
+});
+
+test("flattenStrings/pendingEntries: a flat key containing a literal dot never collides with a same-shaped nested path", () => {
+  // Without escaping, a flat key "a.b" and a nested a -> b both flatten to the exact
+  // same path string "a.b" — the lock file (keyed by this string) can't tell them
+  // apart, so whichever is recorded last overwrites the other's entry, leaving it
+  // permanently "stale" and re-translated every run, and `check` reporting it as such.
+  const data = { "a.b": "literal dotted key", a: { b: "nested value" } };
+  const flat = flattenStrings(data);
+  const paths = flat.map((e) => e.path);
+  assert.equal(new Set(paths).size, paths.length, "every path must be unique");
+  assert.deepEqual(flat, [
+    { path: "a\\.b", value: "literal dotted key" },
+    { path: "a.b", value: "nested value" },
+  ]);
+
+  const pending = pendingEntries(data, {}, false);
+  assert.deepEqual(
+    pending.map((e) => e.path),
+    ["a\\.b", "a.b"],
+  );
 });
 
 test("existingTargets: finds already-translated locales, dir and file layout", () => {
@@ -1270,6 +1501,47 @@ test("Apple .strings: a UTF-16 (BOM) file is read like a UTF-8 one", () => {
   assert.equal(JSON.stringify(readLocaleDoc(be, "fr").data), '{"greeting":"Café!","farewell":"Goodbye"}');
 });
 
+test("detectEncoding/decodeText/encodeText: UTF-16LE and UTF-16BE BOMs round-trip, UTF-8 stays a plain string", () => {
+  const text = "café";
+  assert.equal(detectEncoding(Buffer.from(text, "utf8")), "utf8");
+  const plain = encodeText(text, "utf8");
+  assert.equal(typeof plain, "string", "utf8 is never wrapped in a Buffer");
+  assert.equal(plain, text);
+
+  const le = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(text, "utf16le")]);
+  assert.equal(detectEncoding(le), "utf16le-bom");
+  assert.equal(decodeText(le, "utf16le-bom"), text);
+  assert.deepEqual(encodeText(text, "utf16le-bom"), le);
+
+  const beBody = Buffer.from(text, "utf16le");
+  for (let i = 0; i + 1 < beBody.length; i += 2) [beBody[i], beBody[i + 1]] = [beBody[i + 1], beBody[i]];
+  const be = Buffer.concat([Buffer.from([0xfe, 0xff]), beBody]);
+  assert.equal(detectEncoding(be), "utf16be-bom");
+  assert.equal(decodeText(be, "utf16be-bom"), text);
+  assert.deepEqual(encodeText(text, "utf16be-bom"), be);
+});
+
+test("translate: a UTF-16 (BOM) .strings target keeps its own encoding instead of being rewritten as UTF-8", async () => {
+  // Regression: the existing target was read with a plain fs.readFileSync(file, "utf8")
+  // instead of the same BOM-aware decode every other read in this project uses — for a
+  // UTF-16 ".strings" file (Xcode's traditional default) that garbled "before" into
+  // mojibake, which never equaled the freshly serialized text, so even a no-op run
+  // rewrote the file from scratch as plain UTF-8, permanently losing its BOM/encoding.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-utf16-target-"));
+  fs.mkdirSync(path.join(dir, "en.lproj"));
+  fs.mkdirSync(path.join(dir, "fr.lproj"));
+  fs.writeFileSync(path.join(dir, "en.lproj/Localizable.strings"), '"hello" = "Hi";\n');
+  const frBefore = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('"hello" = "FR:Hi";\n', "utf16le")]);
+  const frFile = path.join(dir, "fr.lproj/Localizable.strings");
+  fs.writeFileSync(frFile, frBefore);
+
+  // Already fully translated and non-stale: no model needed, so this stays fast.
+  const result = await translate({ cwd: dir, from: "en", to: "fr", input: dir });
+  assert.equal(result.locales[0]!.stringsTranslated, 0);
+  assert.equal(result.locales[0]!.filesWritten, 0, "nothing actually changed: a no-op run never touches the file at all");
+  assert.deepEqual(fs.readFileSync(frFile), frBefore, "byte-for-byte unchanged, BOM included");
+});
+
 test("Java .properties: detection (bare and prefixed), region qualifier uses an underscore, not a hyphen", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-properties-"));
   fs.writeFileSync(path.join(root, "messages_en.properties"), "greeting=Hi\n");
@@ -1569,6 +1841,27 @@ test("XLIFF 1.2: detection via --input (untagged source), target filename conven
   assert.deepEqual(existingTargets(layout, "en"), ["fr"]);
 });
 
+test("XLIFF 2.0 is rejected with a clear error instead of silently translating nothing", () => {
+  // XLIFF 2.0 restructured <trans-unit>/<source>/<target> into <unit><segment>
+  // <source>/<target></segment></unit>, which parseXliffUnits doesn't recognize at
+  // all — previously this matched zero units, so translate reported success with 0
+  // strings translated and wrote an untouched copy, with no indication anything was
+  // wrong.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-xliff2-"));
+  const file = path.join(root, "messages.xlf");
+  fs.writeFileSync(
+    file,
+    `<?xml version="1.0" encoding="UTF-8"?>
+<xliff version="2.0" xmlns="urn:oasis:names:tc:xliff:document:2.0" srcLang="en">
+    <file id="f1">
+        <unit id="greeting"><segment><source>Hello</source></segment></unit>
+    </file>
+</xliff>
+`,
+  );
+  assert.throws(() => readLocaleDoc(file, "en", true), /only XLIFF 1\.2 is supported.*version 2\.x/);
+});
+
 test("XLIFF 1.2: inline <x>/<g> markup survives translation like any other protected tag; translate=\"no\" and bpt/ept are left untouched", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-xliff-rw-"));
   const file = path.join(root, "messages.xlf");
@@ -1648,6 +1941,28 @@ test("XLIFF 1.2: inline <x>/<g> markup survives translation like any other prote
   const doc3 = readLocaleDoc(withTarget, "en", true);
   const out3 = doc3.serialize({ greeting: "Salut (ancien) !" }, "fr");
   assert.match(out3, /<target state="translated">Salut \(ancien\) !<\/target>/);
+});
+
+test("XLIFF 1.2: text that documents a tag literally (&lt;b&gt;) round-trips as valid, escaped XML, not a raw tag", () => {
+  // Source text that merely shows markup as an example ("Use <b> tags...") is escaped
+  // in the XML itself (&lt;b&gt;). Unescaping it at read time the same way as genuine
+  // inline markup turns it into an indistinguishable raw "<b>" — which the model is
+  // then free to carry through verbatim, and which escapeXmlKeepTags, unable to tell
+  // it apart from a real tag, would leave unescaped on write, breaking the XML.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-xliff-escaped-tag-"));
+  const file = path.join(root, "messages.xlf");
+  fs.writeFileSync(
+    file,
+    `<xliff version="1.2"><file source-language="en"><body>
+      <trans-unit id="help"><source>Use &lt;b&gt; tags to bold text.</source></trans-unit>
+    </body></file></xliff>\n`,
+  );
+  const doc = readLocaleDoc(file, "en", true);
+  assert.equal((doc.data as { help: string }).help, "Use &lt;b&gt; tags to bold text.");
+
+  const out = doc.serialize({ help: "Utilisez des &lt;b&gt; balises pour mettre le texte en gras." }, "fr");
+  assert.match(out, /<target>Utilisez des &lt;b&gt; balises pour mettre le texte en gras\.<\/target>/);
+  assert.ok(!out.includes("<b>"), "the escaped tag-looking text must never become a raw, unescaped tag");
 });
 
 test("XLIFF 1.2: translate='no' (single quotes) is honored, and a self-closing <target/> is replaced in place rather than duplicated", () => {
@@ -1850,6 +2165,30 @@ test("ARB: @key metadata and @@locale are not translatable and are reinserted; @
   assert.deepEqual(out["@greeting"], { description: "Greeting", placeholders: { name: {} } });
 });
 
+test("ARB: other @@-prefixed file metadata (@@last_modified, @@x-generator, ...) survives a write, not just @@locale", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-arb-meta-"));
+  const file = path.join(root, "intl_en.arb");
+  fs.writeFileSync(
+    file,
+    JSON.stringify(
+      {
+        "@@locale": "en",
+        "@@last_modified": "2024-01-01T00:00:00.000Z",
+        "@@x-generator": "Flutter Intl",
+        greeting: "Hello",
+      },
+      null,
+      2,
+    ),
+  );
+  const doc = readLocaleDoc(file, "en");
+  const out = JSON.parse(doc.serialize({ greeting: "Bonjour" }, "fr"));
+  assert.equal(out["@@locale"], "fr", "the only @@ key that's locale-specific follows the target");
+  assert.equal(out["@@last_modified"], "2024-01-01T00:00:00.000Z", "file-level metadata isn't locale-specific: copied verbatim");
+  assert.equal(out["@@x-generator"], "Flutter Intl");
+  assert.equal(out.greeting, "Bonjour");
+});
+
 test("gettext .po: msgid is the stable key; plural entries are translated and expanded to the target's plural count", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-po-"));
   const file = path.join(root, "en.po");
@@ -1886,15 +2225,63 @@ test("gettext .po: msgid is the stable key; plural entries are translated and ex
   // French (nplurals=2): index 0 from the singular-sourced translation, index 1 from the plural-sourced one.
   assert.match(text, /msgid_plural "items_plural"\nmsgstr\[0\] "un article"\nmsgstr\[1\] "plusieurs articles"/);
 
-  // Arabic (nplurals=6): all indices past 0 get the plural-sourced translation.
+  // Arabic (nplurals=6): index 0 is the "zero" category, not the singular — real
+  // gettext/ngettext picks index 1 for n==1, so the singular-sourced translation
+  // goes there, and every OTHER index (0, 2-5) gets the plural-sourced one.
   const arBuilt = { "\u0004items\u0005one": "عنصر واحد", "\u0004items\u0005other": "عناصر" };
   const arText = doc.serialize(arBuilt, "ar");
-  assert.match(arText, /msgstr\[0\] "عنصر واحد"/);
-  for (let i = 1; i < 6; i++) assert.match(arText, new RegExp(`msgstr\\[${i}\\] "عناصر"`));
+  assert.match(arText, /msgstr\[1\] "عنصر واحد"/);
+  for (const i of [0, 2, 3, 4, 5]) assert.match(arText, new RegExp(`msgstr\\[${i}\\] "عناصر"`));
 
   // A target with no translation yet falls back to the English msgid/msgid_plural, not empty strings.
   const untouched = doc.serialize({}, "es");
   assert.match(untouched, /msgstr\[0\] "items"\nmsgstr\[1\] "items_plural"/);
+});
+
+test("gettext .po: Arabic's singular form lands in msgstr[1] (its own \"one\" slot), not msgstr[0] (\"zero\")", () => {
+  // Real gettext: Arabic's Plural-Forms resolves n==0 to index 0 ("zero") and n==1 to
+  // index 1 ("one") — unlike every other language this project hardcodes, where n==1
+  // is always index 0. Verified against real msgfmt/ngettext, not just this test.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-po-ar-plural-"));
+  const file = path.join(root, "en.po");
+  fs.writeFileSync(
+    file,
+    [
+      'msgid ""',
+      'msgstr ""',
+      '"Content-Type: text/plain; charset=UTF-8\\n"',
+      '"Language: en\\n"',
+      '"Plural-Forms: nplurals=2; plural=(n != 1);\\n"',
+      "",
+      'msgid "file_one"',
+      'msgid_plural "file_other"',
+      'msgstr[0] "You have %d file"',
+      'msgstr[1] "You have %d files"',
+      "",
+    ].join("\n"),
+  );
+  const doc = readLocaleDoc(file, "en", true, true);
+  const built = { "\u0004file_one\u0005one": "ملف واحد %d", "\u0004file_one\u0005other": "%d ملفات" };
+  const out = doc.serialize(built, "ar");
+  assert.match(out, /msgstr\[0\] "%d ملفات"/, "index 0 (\"zero\") gets the plural-sourced form");
+  assert.match(out, /msgstr\[1\] "ملف واحد %d"/, "index 1 (\"one\") gets the singular-sourced form");
+  for (const i of [2, 3, 4, 5]) assert.match(out, new RegExp(`msgstr\\[${i}\\] "%d ملفات"`));
+
+  // Reading that same Arabic file back as an existing target recovers the right
+  // singular text from its own "one" slot (index 1), not index 0.
+  const arFile = path.join(root, "ar.po");
+  fs.writeFileSync(arFile, out);
+  const target = readLocaleDoc(arFile, "ar", false);
+  assert.equal(JSON.stringify(target.data), JSON.stringify({ "\u0004file_one\u0005one": "ملف واحد %d", "\u0004file_one\u0005other": "%d ملفات" }));
+
+  // A translator reviews and clears the fuzzy flag; a rerun with nothing else
+  // changed must not re-add it. Before this fix, forms[0] held the "zero" text,
+  // which never equals the "one" value, so a changed check against index 0 saw
+  // Arabic entries as changed on every single run and kept re-flagging them fuzzy
+  // even after a translator had cleared it.
+  const reviewed = out.replace("#, fuzzy\n", "");
+  const rerun = doc.serialize(built, "ar", reviewed);
+  assert.ok(!rerun.includes("#, fuzzy"), "the cleared fuzzy flag must not come back when nothing changed");
 });
 
 test("gettext .po: a template source (empty msgstr) falls back to msgid, never for a target file", () => {
@@ -2170,6 +2557,40 @@ test("engine: a suspicious batched output is retried alone, and the clean retry 
   assert.ok(r2.issues.some((i) => i.kind === "repetition"));
 });
 
+test("engine: an inline tag whose content comes back empty is retried alone, and reported if it still comes back empty", async () => {
+  // Simulates a real bug: a model sometimes learns a "natural"-style tag pair's own
+  // numbered id (<0>...</0>) as a do-not-translate marker like {0}, and drops its
+  // content entirely — "Read the <a href=...>terms</a>." -> an empty link — even
+  // though the rest of the sentence translates fine. Batch-dependent, like other
+  // quantization noise: dropped only when batched with another string.
+  const dropsTagContentWhenBatched: Translator = {
+    translate: async (texts) =>
+      texts.map((s) => {
+        if (!s.includes("<0>")) return s;
+        const translated = s.replace("Read the", "Lea los");
+        return texts.length > 1 ? translated.replace(/<0>.*?<\/0>/, "<0></0>") : translated.replace("terms", "términos");
+      }),
+    dispose: async () => {},
+  };
+  const source = 'Read the <a href="/terms">terms</a>.';
+  const batched = await translateStrings([source, "Good night"], [dropsTagContentWhenBatched], {
+    sourceLang: "en",
+    targetLang: "es",
+    batchSize: 4,
+  });
+  assert.equal(batched.translations.get(source), 'Lea los <a href="/terms">términos</a>.');
+  assert.equal(batched.issues.length, 0, "the solo retry succeeded, so nothing is reported");
+
+  // When even the solo retry still comes back empty, the (flawed) output ships and is reported.
+  const alwaysDropsTagContent: Translator = {
+    translate: async (texts) => texts.map((s) => (s.includes("<0>") ? s.replace(/<0>.*?<\/0>/, "<0></0>").replace("Read the", "Lea los") : s)),
+    dispose: async () => {},
+  };
+  const r2 = await translateStrings([source], [alwaysDropsTagContent], { sourceLang: "en", targetLang: "es", batchSize: 4 });
+  assert.equal(r2.translations.get(source), 'Lea los <a href="/terms"></a>.');
+  assert.ok(r2.issues.some((i) => i.kind === "empty-tag"));
+});
+
 test("engine: an i18next _one string is retranslated with a literal 1, fixing the wrong plural noun", async () => {
   // Simulates a measured real bug: given the masked {0} marker, the model infers the
   // target's PLURAL noun form even though the English source is singular; given the
@@ -2198,6 +2619,31 @@ test("engine: an i18next _one string is retranslated with a literal 1, fixing th
     singularHints: new Set([source]),
   });
   assert.equal(withHint.translations.get(source), "Vous avez {{count}} fichier");
+});
+
+test("engine: a non-i18next singular hint (Android <plurals>/.po's %d, not {{count}}) also gets the literal-1 grammar retry", async () => {
+  // fixSingularGrammar used to require the string's one masked placeholder to be
+  // {{count}} specifically. Android's <plurals> "one" item and .po's msgstr[0] (or
+  // msgstr[1] for Arabic) are grammatically singular the same way, but use a printf
+  // specifier (%d) instead — pluralOneStrings now surfaces these too (see its own
+  // test), so the retry must accept any single placeholder, not just {{count}}.
+  const grammarSensitive: Translator = {
+    translate: async (texts) =>
+      texts.map((s) => {
+        if (s === "{0} file") return "{0} fichiers";
+        if (s === "1 file") return "1 fichier";
+        return s;
+      }),
+    dispose: async () => {},
+  };
+  const source = "%d file";
+  const withHint = await translateStrings([source], [grammarSensitive], {
+    sourceLang: "en",
+    targetLang: "fr",
+    batchSize: 4,
+    singularHints: new Set([source]),
+  });
+  assert.equal(withHint.translations.get(source), "%d fichier");
 });
 
 test("engine: several _one keys are retranslated in one batched model call, not one call per key", async () => {

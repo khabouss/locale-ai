@@ -81,6 +81,17 @@ function parseXliffUnits(text: string): { segments: XliffSegment[]; units: Xliff
  * filename convention to auto-detect from.
  */
 export function readXliffDoc(file: string, text: string, isSource: boolean): LocaleDoc {
+  // XLIFF 2.0 restructured the format entirely — a translatable unit is <unit><segment>
+  // <source>/<target></segment></unit>, not a <trans-unit> with <source>/<target> as its
+  // direct children, and the file-level language attribute is trgLang, not target-language.
+  // parseXliffUnits below only recognizes the 1.2 shape, so a 2.0 file silently matches zero
+  // units: translate reports success with 0 strings translated, writes an untouched copy,
+  // and sets a target-language attribute that 2.0 tooling doesn't read at all. Caught here
+  // instead, with a clear error, rather than passing all of that through as if it worked.
+  const versionMatch = /<xliff\b[^>]*\bversion="(\d+)\.\d+"/.exec(text);
+  if (versionMatch && versionMatch[1] !== "1") {
+    throw new Error(`Invalid XLIFF in ${file}: only XLIFF 1.2 is supported (found version ${versionMatch[1]}.x).`);
+  }
   if (!/<file\b[^>]*>/.test(text)) throw new Error(`Invalid XLIFF in ${file}: no <file> element found.`);
   const { segments, units } = parseXliffUnits(text);
   const data = newObj();
