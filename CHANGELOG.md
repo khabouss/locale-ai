@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **YAML merge key (`<<: *defaults`) got moved to the end of its map, losing overrides under Ruby/Rails** — `reorderToMatch` sorts each map's pairs to match the translated data's own key order, but a merge key's contents were already flattened into its siblings by `toJS()`, so it wasn't one of those keys and sorted to the end instead. The `yaml` package (and PyYAML) give an explicit key priority over `<<` regardless of position, which is why this looked harmless — but Ruby's Psych (what Rails uses) applies `<<` where it textually appears, so a merge key moved after an overriding key silently discarded that override (verified against real Ruby, not just a simulator). `<<:` now stays exactly where it was in the source map (normally first) ([khabouss/locale-ai#44](https://github.com/khabouss/locale-ai/issues/44)).
+
 ## 0.7.23
 
 Fixes two regressions from 0.7.22's curly-quote fix, caught by re-testing that release against real fr/de/it/es model runs and real `java.text.MessageFormat` via Docker ([khabouss/locale-ai#42](https://github.com/khabouss/locale-ai/issues/42)):

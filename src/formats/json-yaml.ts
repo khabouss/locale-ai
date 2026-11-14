@@ -89,7 +89,16 @@ function reorderToMatch(doc: Document, base: Array<string | number>, v: unknown)
       const i = order.indexOf(String(k));
       return i < 0 ? order.length : i; // a key `v` doesn't have (never removed here) sorts last, stable among itself
     };
-    node.items.sort((a, b) => rank(a) - rank(b));
+    // A merge-key pair's contents were already flattened into v's own siblings by
+    // `toJS()`, so it isn't one of `order`'s keys and `rank` alone would push it to
+    // the very end — but the `yaml` package (and PyYAML) apply explicit keys over a
+    // merge key regardless of position, while Ruby's Psych (what Rails uses) applies
+    // `<<` where it textually appears, so a merge key moved after an overriding key
+    // silently discards that override under Ruby. Left exactly where it already was;
+    // only the other pairs are reordered, into the remaining slots.
+    const others = node.items.filter((p) => !isMergeKeyPair(p)).sort((a, b) => rank(a) - rank(b));
+    let i = 0;
+    node.items = node.items.map((p) => (isMergeKeyPair(p) ? p : others[i++]));
   }
   for (const [k, val] of Object.entries(v)) reorderToMatch(doc, [...base, k], val);
 }
