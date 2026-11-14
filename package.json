@@ -49,7 +49,18 @@
     "locales",
     "i18next",
     "offline",
-    "cli"
+    "cli",
+    "icu",
+    "gettext",
+    "po",
+    "yaml",
+    "android",
+    "flutter",
+    "arb",
+    "xcstrings",
+    "xliff",
+    "resx",
+    "opus-mt"
   ],
   "license": "MIT",
   "dependencies": {
