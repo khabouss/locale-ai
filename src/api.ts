@@ -15,7 +15,7 @@ import { writeFileAtomic } from "./fs-atomic.ts";
 import { glossaryLookup, loadConfig, protectRegex, type ProjectConfig } from "./glossary.ts";
 import { extractIcu, isIcuComplex } from "./icu.ts";
 import { intlCode, parseLocale, type Locale } from "./lang.ts";
-import { editedPaths, isEdited, isSourceStale, LOCK_FILENAME, loadLock, mergeAndSaveLock, recordEntries, type LockFile } from "./lock.ts";
+import { editedPaths, isEdited, isSourceStale, LOCK_FILENAME, loadLock, lockedPathsFor, mergeAndSaveLock, recordEntries, type LockFile } from "./lock.ts";
 import {
   addNestedPluralForms,
   addPluralForms,
@@ -23,6 +23,7 @@ import {
   detectLayout,
   existingTargets,
   flattenStrings,
+  isPluralCategoryPath,
   keyPathProtect,
   pendingEntries,
   pluralOneStrings,
@@ -345,7 +346,14 @@ export async function translate(opts: TranslateOptions): Promise<TranslateResult
           allIssues.push({ source: editedPath, kind: alsoStale ? "conflict" : "edited", locale: job.locale.tag });
         }
       }
-      const built = buildTarget(f.doc.data, f.existing, (s) => translations.get(s) ?? s, opts.overwrite ?? false, isProtectedKey, isStale);
+      const lockedPaths = lockedPathsFor(lock, lockKey, job.locale.tag);
+      const isOrphaned = (p: string): boolean => {
+        if (isPluralCategoryPath(p, srcPaths)) return false;
+        if (lockedPaths.has(p)) return true;
+        for (const lp of lockedPaths) if (lp.startsWith(`${p}.`) || lp.startsWith(`${p}[`)) return true;
+        return false;
+      };
+      const built = buildTarget(f.doc.data, f.existing, (s) => translations.get(s) ?? s, opts.overwrite ?? false, isProtectedKey, isStale, isOrphaned);
       const translatedSet = new Set(f.pendingPaths);
       const pluralOpts = {
         otherStale: (p: string) => translatedSet.has(p),
@@ -414,7 +422,8 @@ export type CheckIssue =
   | { locale: string; kind: "placeholder-mismatch"; target: string; path: string; sourcePlaceholders: string[]; targetPlaceholders: string[] }
   | { locale: string; kind: "icu-structure"; target: string; path: string }
   | { locale: string; kind: "stale"; target: string; path: string }
-  | { locale: string; kind: "identical"; target: string; path: string };
+  | { locale: string; kind: "identical"; target: string; path: string }
+  | { locale: string; kind: "orphan-key"; target: string; path: string };
 
 export interface CheckLocaleResult {
   locale: string;
@@ -422,7 +431,9 @@ export interface CheckLocaleResult {
   mismatched: number;
   stale: number;
   identical: number;
-  /** False when `missing`, `mismatched` or `stale` is nonzero — `identical` alone never fails a locale. */
+  /** Target keys with no source counterpart (and not a still-valid plural category) — a deleted or renamed source key left behind. Never fails a locale on its own, same as `identical`. */
+  orphaned: number;
+  /** False when `missing`, `mismatched` or `stale` is nonzero — `identical`/`orphaned` alone never fail a locale. */
   ok: boolean;
 }
 
@@ -462,6 +473,7 @@ export async function check(opts: CheckOptions = {}): Promise<CheckResult> {
     let mismatched = 0;
     let identical = 0;
     let stale = 0;
+    let orphaned = 0;
     for (const { file, doc } of sources) {
       const target = targetFile(layout, from.tag, to, file);
       const lockKey = fileKey(file, lockDir);
@@ -472,7 +484,18 @@ export async function check(opts: CheckOptions = {}): Promise<CheckResult> {
         continue;
       }
       const srcFlat = flattenStrings(doc.data);
+      const srcPaths = new Set(srcFlat.map((e) => e.path));
       const tgtByPath = new Map(flattenStrings(readLocaleDoc(target, to).data).map((e) => [e.path, e.value]));
+      // A target key with no source counterpart at all — unless it's a plural category
+      // still legitimately derived from the source (see isPluralCategoryPath) — is a
+      // source key that's been deleted or renamed since this target was last written;
+      // it lingers in the file forever otherwise, with nothing surfacing it until now.
+      for (const p of tgtByPath.keys()) {
+        if (!srcPaths.has(p) && !isPluralCategoryPath(p, srcPaths)) {
+          orphaned++;
+          issues.push({ locale: to, kind: "orphan-key", target, path: p });
+        }
+      }
       for (const { path: p, value: srcVal } of srcFlat) {
         const tgtVal = tgtByPath.get(p);
         if (tgtVal === undefined) {
@@ -516,7 +539,7 @@ export async function check(opts: CheckOptions = {}): Promise<CheckResult> {
         }
       }
     }
-    locales.push({ locale: to, missing, mismatched, stale, identical, ok: !(missing || mismatched || stale) });
+    locales.push({ locale: to, missing, mismatched, stale, identical, orphaned, ok: !(missing || mismatched || stale) });
   }
   return { ok: locales.every((l) => l.ok), locales, issues };
 }

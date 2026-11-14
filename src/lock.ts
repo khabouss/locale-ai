@@ -184,6 +184,23 @@ export function recordEntries(
   }
 }
 
+/**
+ * Every leaf path this tool has previously written a translation to, for `fileKey`
+ * and `targetTag` specifically — i.e. what the lock recorded as of the START of this
+ * run, before anything it does this run can have changed it. Used to recognize a
+ * target-only key as one THIS TOOL put there for a source key that's since been
+ * deleted or renamed (see `locales.ts`'s `buildTarget`), rather than one added some
+ * other way (by hand, by another tool) that was never this tool's to prune.
+ */
+export function lockedPathsFor(lock: LockFile, fileKey: string, targetTag: string): Set<string> {
+  const prefix = entryKey(fileKey, "");
+  const out = new Set<string>();
+  for (const key of Object.keys(lock.entries)) {
+    if (key.startsWith(prefix) && lock.entries[key][targetTag] !== undefined) out.add(key.slice(prefix.length));
+  }
+  return out;
+}
+
 /** Removes lock entries (for every locale) whose key path no longer exists in the current source — so a deleted key doesn't linger forever. */
 export function pruneDeletedKeys(lock: LockFile, fileKey: string, currentPaths: Iterable<string>): void {
   const keep = new Set(currentPaths);

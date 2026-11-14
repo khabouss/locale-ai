@@ -10,7 +10,7 @@ import { translateStrings } from "../src/engine.ts";
 import { extractIcu } from "../src/icu.ts";
 import { extractPipePlural } from "../src/vue-plural.ts";
 import { parseLocale } from "../src/lang.ts";
-import { editedPaths, hashOf, isEdited, isSourceStale, loadLock, pruneDeletedKeys, recordEntries, saveLock } from "../src/lock.ts";
+import { editedPaths, hashOf, isEdited, isSourceStale, loadLock, lockedPathsFor, pruneDeletedKeys, recordEntries, saveLock } from "../src/lock.ts";
 import {
   addNestedPluralForms,
   addPluralForms,
@@ -18,6 +18,7 @@ import {
   detectLayout,
   existingTargets,
   flattenStrings,
+  isPluralCategoryPath,
   keyPathProtect,
   pendingEntries,
   pendingStrings,
@@ -27,6 +28,7 @@ import {
   targetFile,
   usesI18nextPlurals,
 } from "../src/locales.ts";
+import { check, translate } from "../src/api.ts";
 import type { Translator } from "../src/models.ts";
 import { hasTranslatableText, mask, unmask } from "../src/placeholders.ts";
 import { splitSentences } from "../src/segment.ts";
@@ -237,6 +239,62 @@ test("pendingStrings/buildTarget: isStale forces re-translation of a non-empty t
   assert.equal(JSON.stringify(built), JSON.stringify({ a: "[Hello]", b: "Monde" }));
 });
 
+test("buildTarget: isOrphaned drops a target-only key/subtree instead of preserving it forever", () => {
+  const src = { a: "Hello" };
+  const existing = { a: "Bonjour", deleted: "Was a source key once", group: { deleted: "Whole subtree gone" }, kept: "Never consulted" };
+  const isOrphaned = (p: string) => p === "deleted" || p === "group";
+  const built = buildTarget(src, existing, (s) => s, false, undefined, undefined, isOrphaned);
+  assert.equal(JSON.stringify(built), JSON.stringify({ a: "Bonjour", kept: "Never consulted" }));
+});
+
+test("isPluralCategoryPath: recognizes a nested group's and a flat i18next suffix's category siblings, not an unrelated key", () => {
+  const srcPaths = new Set(["group.one", "group.other", "fileCount_one", "fileCount_other", "plain"]);
+  assert.equal(isPluralCategoryPath("group.few", srcPaths), true, "nested sibling of a still-present group");
+  assert.equal(isPluralCategoryPath("fileCount_few", srcPaths), true, "flat suffix sibling of a still-present base");
+  assert.equal(isPluralCategoryPath("plain", srcPaths), false, "an ordinary key is never mistaken for a category");
+  assert.equal(isPluralCategoryPath("removedGroup.few", srcPaths), false, "no surviving \"other\" sibling: not a category, not protected");
+  assert.equal(isPluralCategoryPath("removedCount_few", srcPaths), false, "same, flat style");
+});
+
+test("check/translate: a deleted/renamed source key is reported by check and pruned by translate, but a never-tracked target-only key is left alone", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-orphan-"));
+  fs.mkdirSync(path.join(dir, "locales"));
+  fs.writeFileSync(path.join(dir, "locales/en.json"), JSON.stringify({ greeting: "Hello", farewell: "Goodbye" }));
+  fs.writeFileSync(
+    path.join(dir, "locales/fr.json"),
+    JSON.stringify({ greeting: "FR:Hello", farewell: "FR:Goodbye", deprecated_key: "FR:removed from source", manual_key: "Never a source key" }),
+  );
+  // Only "deprecated_key" was ever recorded by this tool (source hash/written hash both
+  // real) — "manual_key" has no lock entry at all, the same as a key someone added by hand.
+  fs.writeFileSync(
+    path.join(dir, "locales/locale-ai.lock.json"),
+    JSON.stringify({
+      version: 3,
+      entries: {
+        "en.json#greeting": { fr: `${hashOf("Hello")}:${hashOf("FR:Hello")}` },
+        "en.json#farewell": { fr: `${hashOf("Goodbye")}:${hashOf("FR:Goodbye")}` },
+        "en.json#deprecated_key": { fr: `${hashOf("anything")}:${hashOf("FR:removed from source")}` },
+      },
+    }),
+  );
+
+  // check reports every target-only key regardless of lock history — it never writes
+  // anything, so being inclusive here is only informational, not destructive.
+  const checked = await check({ cwd: dir, from: "en" });
+  assert.equal(checked.locales[0]!.orphaned, 2);
+  assert.deepEqual(
+    checked.issues.filter((i) => i.kind === "orphan-key").map((i) => (i as { path: string }).path).toSorted(),
+    ["deprecated_key", "manual_key"],
+  );
+
+  // translate only prunes what IT tracked in the lock as coming from a now-vanished
+  // source key — "manual_key" was never this tool's to begin with, so it's left alone.
+  const translated = await translate({ cwd: dir, from: "en", to: "fr" });
+  assert.equal(translated.locales[0]!.stringsTranslated, 0, "both real keys already translated and non-stale: no model needed");
+  const after = JSON.parse(fs.readFileSync(path.join(dir, "locales/fr.json"), "utf8"));
+  assert.deepEqual(after, { greeting: "FR:Hello", farewell: "FR:Goodbye", manual_key: "Never a source key" });
+});
+
 test("pendingStrings/buildTarget: a legitimately empty source string is not perpetually re-translated", () => {
   // Regression: needsTranslation used to treat any empty-string target as
   // unfinished, even when the source itself is "" (so the target is already
@@ -295,6 +353,21 @@ test("lock: a source edit is detected as stale; a translator edit is flagged, no
   assert.deepEqual(loadLock(file), lock);
   assert.equal(hashOf("x"), hashOf("x"));
   assert.notEqual(hashOf("x"), hashOf("y"));
+});
+
+test("lockedPathsFor: every leaf path this tool previously translated, for one file and locale", () => {
+  const lock = loadLock(path.join(fs.mkdtempSync(path.join(os.tmpdir(), "lai-lockedpaths-")), "locale-ai.lock.json"));
+  recordEntries(lock, "en.json", "fr", [
+    { path: "greeting", source: "Hello", written: "Bonjour" },
+    { path: "farewell", source: "Goodbye", written: "Au revoir" },
+  ]);
+  recordEntries(lock, "en.json", "es", [{ path: "greeting", source: "Hello", written: "Hola" }]);
+  recordEntries(lock, "other.json", "fr", [{ path: "greeting", source: "Hi", written: "Salut" }]);
+
+  assert.deepEqual(lockedPathsFor(lock, "en.json", "fr"), new Set(["greeting", "farewell"]));
+  assert.deepEqual(lockedPathsFor(lock, "en.json", "es"), new Set(["greeting"]));
+  assert.deepEqual(lockedPathsFor(lock, "en.json", "de"), new Set(), "a locale never translated has no locked paths");
+  assert.deepEqual(lockedPathsFor(lock, "other.json", "fr"), new Set(["greeting"]), "a different file's entries are never mixed in");
 });
 
 test("lock: two concurrent processes translating different locales both keep their lock history (no lost update)", async () => {

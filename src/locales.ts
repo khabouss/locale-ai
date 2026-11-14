@@ -487,7 +487,11 @@ export function pendingStrings(
 /**
  * Builds the target document: source structure and key order, existing
  * translations kept (unless overwrite or stale), new strings from `translate`,
- * and keys that only exist in the target preserved at the end. A string at a
+ * and keys that only exist in the target preserved at the end — UNLESS `isOrphaned`
+ * says this tool put them there for a source key that's since been deleted or
+ * renamed, in which case they're dropped instead of lingering forever (see
+ * `isPluralCategoryPath`, which `isOrphaned`'s caller uses so a normal derived
+ * plural category is never mistaken for one of these and pruned). A string at a
  * protected path (see keyPathProtect) is always copied from the source
  * verbatim. `isStale` (see the lock module) forces re-translation of a
  * non-empty target when its source string has changed since it was last
@@ -500,6 +504,7 @@ export function buildTarget(
   overwrite: boolean,
   isProtected?: (path: string) => boolean,
   isStale?: (path: string, source: string) => boolean,
+  isOrphaned?: (path: string) => boolean,
 ): unknown {
   const visit = (s: unknown, e: unknown, path: string): unknown => {
     if (typeof s === "string") {
@@ -510,7 +515,7 @@ export function buildTarget(
     if (isObj(s)) {
       const out = newObj();
       for (const k of Object.keys(s)) out[k] = visit(s[k], isObj(e) ? e[k] : undefined, joinPath(path, k));
-      if (isObj(e)) for (const k of Object.keys(e)) if (!(k in out)) out[k] = e[k];
+      if (isObj(e)) for (const k of Object.keys(e)) if (!(k in out) && !isOrphaned?.(joinPath(path, k))) out[k] = e[k];
       return out;
     }
     return s;
@@ -556,6 +561,25 @@ export function pluralOneStrings(data: unknown, out: Set<string> = new Set()): S
   };
   visit(data);
   return out;
+}
+
+/**
+ * True when `path` is a plural-category leaf that's still legitimately derived from
+ * the CURRENT source — a nested `{one, other, ...}` group whose own "other" sibling
+ * is still a literal source path, or a flat i18next `<base>_<category>` suffix whose
+ * `<base>_other` is still one. A plural category (`_few`, `.two`, ...) is expected to
+ * be absent from the source itself (only the "one"/"other" the source actually needs
+ * ever are, per `addPluralForms`/`addNestedPluralForms`), so a plain "not in source"
+ * test can't tell this apart from a key whose source has genuinely been deleted or
+ * renamed — used by both `check`'s "orphan-key" issue and `buildTarget`'s pruning so
+ * neither mistakes a normal derived category for one.
+ */
+export function isPluralCategoryPath(path: string, srcPaths: Set<string>): boolean {
+  const lastDot = path.lastIndexOf(".");
+  const lastSeg = lastDot === -1 ? path : path.slice(lastDot + 1);
+  if (CATEGORIES.includes(lastSeg) && srcPaths.has(lastDot === -1 ? "other" : `${path.slice(0, lastDot)}.other`)) return true;
+  const m = PLURAL_KEY.exec(path);
+  return !!m && srcPaths.has(`${m[1]}${m[2] ?? ""}_other`);
 }
 
 /**
