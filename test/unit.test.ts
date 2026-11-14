@@ -2071,6 +2071,30 @@ test("ARB: @key metadata and @@locale are not translatable and are reinserted; @
   assert.deepEqual(out["@greeting"], { description: "Greeting", placeholders: { name: {} } });
 });
 
+test("ARB: other @@-prefixed file metadata (@@last_modified, @@x-generator, ...) survives a write, not just @@locale", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-arb-meta-"));
+  const file = path.join(root, "intl_en.arb");
+  fs.writeFileSync(
+    file,
+    JSON.stringify(
+      {
+        "@@locale": "en",
+        "@@last_modified": "2024-01-01T00:00:00.000Z",
+        "@@x-generator": "Flutter Intl",
+        greeting: "Hello",
+      },
+      null,
+      2,
+    ),
+  );
+  const doc = readLocaleDoc(file, "en");
+  const out = JSON.parse(doc.serialize({ greeting: "Bonjour" }, "fr"));
+  assert.equal(out["@@locale"], "fr", "the only @@ key that's locale-specific follows the target");
+  assert.equal(out["@@last_modified"], "2024-01-01T00:00:00.000Z", "file-level metadata isn't locale-specific: copied verbatim");
+  assert.equal(out["@@x-generator"], "Flutter Intl");
+  assert.equal(out.greeting, "Bonjour");
+});
+
 test("gettext .po: msgid is the stable key; plural entries are translated and expanded to the target's plural count", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-po-"));
   const file = path.join(root, "en.po");

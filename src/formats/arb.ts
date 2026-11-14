@@ -18,7 +18,16 @@ export function readArbDoc(file: string, text: string): LocaleDoc {
     const out = newObj();
     if (hasLocale) out["@@locale"] = targetTag;
     for (const k of Object.keys(raw)) {
-      if (k === "@@locale" || k.startsWith("@")) continue;
+      if (k === "@@locale") continue;
+      // Other "@@"-prefixed keys (@@last_modified, @@x-generator, @@author, ...) are
+      // file-level metadata, not tied to any one string — unlike "@@locale", they
+      // describe the file regardless of which locale it's in, so they're carried
+      // over verbatim instead of being silently dropped.
+      if (k.startsWith("@@")) {
+        out[k] = raw[k];
+        continue;
+      }
+      if (k.startsWith("@")) continue;
       out[k] = typeof obj[k] === "string" ? obj[k] : raw[k];
       if (`@${k}` in raw) out[`@${k}`] = raw[`@${k}`];
     }
