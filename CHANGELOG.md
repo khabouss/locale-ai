@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.25
+
+Four fixes for regressions that 0.7.24's own dotted-key-escaping and orphan-key-pruning fixes introduced, found by re-testing the published 0.7.24 against the round-8 fixtures plus new tests aimed at the changed code ([khabouss/locale-ai#49](https://github.com/khabouss/locale-ai/issues/49)):
+
+- **`doNotTranslateKeys` no longer protected a flat key whose literal name contains a dot** — a top-level key named `"brand.name"` now produces the escaped path `brand\.name` (0.7.24's dotted-key fix), but `keyPathProtect` still compared it against the caller's unescaped `"brand.name"` and never matched, so a listed key got translated anyway. Both readings — the plain one (a nested `brand` → `name` pair, the common case) and the key escaped the same way a flat key of that name would be — are matched now.
+- **Upgrading from 0.7.23 silently lost change tracking for a flat dotted key** — the old lock stored the unescaped path (`"menu.save"`); 0.7.24 looked up the new, escaped one (`"menu\.save"`) and found nothing, so the key looked never-tracked-but-already-translated (existing text, no staleness record), and a source edit on it was silently ignored from then on. `isSourceStale`/`isEdited` now fall back to the pre-0.7.24 unescaped path and migrate it onto the new key on the first hit.
+- **A key pruned from a `.properties` target was written as `key=` (an empty value) instead of the line being removed** — worse than before 0.7.24's pruning existed at all: Java finds the key and uses that empty string rather than falling back to the English default. The line is now dropped when its key is absent from the built target altogether.
+- **A key pruned from a YAML target was never actually removed** — the YAML writer edits the existing document in place and only ever sets or reorders paths the new data still has; nothing deleted a pair that fell out of it. `check` already reported these as orphans; `translate` now removes them too, without touching a merge-key pair itself.
+
 ## 0.7.24
 
 External review round 8, 14 confirmed bugs across every format, verified against real tools wherever possible (Ruby/Psych, `xmllint`, `msgfmt`/`ngettext`, the `@formatjs` ICU parser) rather than just this project's own simulators ([khabouss/locale-ai#44](https://github.com/khabouss/locale-ai/issues/44), [khabouss/locale-ai#46](https://github.com/khabouss/locale-ai/issues/46)):

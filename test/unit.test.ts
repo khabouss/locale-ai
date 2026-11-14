@@ -233,6 +233,17 @@ test("keyPathProtect: protects an exact path and everything nested under it (an 
   assert.equal(keyPathProtect([]), undefined);
 });
 
+test("keyPathProtect: also protects a flat key whose literal name contains a dot (regression: 0.7.24 escapes it in the real path)", () => {
+  // A single, top-level key literally named "brand.name" produces the escaped path
+  // "brand\.name" (joinPath, added to stop it colliding with a nested brand->name
+  // path) — doNotTranslateKeys written in the natural, unescaped form must still match it.
+  const isProtected = keyPathProtect(["brand.name"]);
+  assert.equal(isProtected("brand\\.name"), true, "flat key's own escaped path matches");
+  assert.equal(isProtected("brand\\.name.tagline"), true, "nested under the escaped flat key still protected");
+  // Nested two-segment paths (brand -> name) are unaffected: neither segment has a literal dot.
+  assert.equal(keyPathProtect(["a.b"])("a.b"), true);
+});
+
 test("pendingStrings/buildTarget: isStale forces re-translation of a non-empty target", () => {
   const src = { a: "Hello", b: "World" };
   const existing = { a: "Bonjour", b: "Monde" };
@@ -356,6 +367,24 @@ test("lock: a source edit is detected as stale; a translator edit is flagged, no
   assert.deepEqual(loadLock(file), lock);
   assert.equal(hashOf("x"), hashOf("x"));
   assert.notEqual(hashOf("x"), hashOf("y"));
+});
+
+test("lock: a pre-0.7.24 entry for a flat dotted key is found by its new, escaped path, and migrated onto it (regression)", () => {
+  // Before 0.7.24 escaped a literal "." within a key, a flat key named "menu.save"
+  // and a nested "menu" -> "save" produced the exact same lock path string. The lock
+  // for a pre-existing project recorded the OLD, unescaped path ("menu.save") — if
+  // isSourceStale/isEdited only ever looked up the new escaped path ("menu\.save"),
+  // they'd find nothing, treat the key as never-tracked (so a non-empty existing
+  // target looks already up to date), and a source edit on it would be silently
+  // ignored forever.
+  const lock = { version: 3 as const, entries: { "en.json#menu.save": { fr: `${hashOf("Save profile")}:${hashOf("Enregistrer le profil")}` } } };
+  assert.equal(isSourceStale(lock, "en.json", "menu\\.save", "fr", "Save profile"), false, "unchanged source: not stale via the legacy fallback");
+  assert.equal(isSourceStale(lock, "en.json", "menu\\.save", "fr", "Save user profile"), true, "source edit is still detected, not silently lost");
+  assert.equal(isEdited(lock, "en.json", "menu\\.save", "fr", "Enregistrer le profil"), false);
+
+  // The fallback hit migrates the entry onto the new key, so a later lookup (and the
+  // next save) finds it directly without the old key around to search for.
+  assert.deepEqual(lock.entries["en.json#menu\\.save"], { fr: `${hashOf("Save profile")}:${hashOf("Enregistrer le profil")}` });
 });
 
 test("lockedPathsFor: every leaf path this tool previously translated, for one file and locale", () => {
@@ -1341,6 +1370,29 @@ test("YAML: a merge key stays exactly where it was in the source, not moved to t
   assert.match(rerun, /profile:\n {2}<<: \*defaults\n {2}save: FR:Save profile/, rerun);
 });
 
+test("YAML: a key dropped by buildTarget's isOrphaned pruning is removed from the target, not left behind forever (regression)", () => {
+  // Unlike the JSON writer (built fresh from the new data alone, so a dropped key just
+  // isn't there), this serializer edits the existing document in place and otherwise
+  // only ever sets/reorders paths the new data already has — nothing deleted a pair
+  // that fell out of the source, so a renamed/deleted key lingered in the YAML target
+  // forever even after buildTarget correctly excluded it.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-yaml-prune-"));
+  const file = path.join(root, "fr.yml");
+  fs.writeFileSync(file, "greeting: Bonjour\nold_key: Valeur supprimée\nnested:\n  kept: Garde\n  gone: Supprime\n");
+  const doc = readLocaleDoc(file, "fr");
+  const out = doc.serialize({ greeting: "Bonjour", nested: { kept: "Garde" } }, "fr");
+  assert.equal(out, "greeting: Bonjour\nnested:\n  kept: Garde\n");
+
+  // A merge key itself is never swept up by the same pruning (its contents live in
+  // the data's siblings via toJS({merge:true}), not as a key of v's own).
+  const merged = path.join(root, "fr-merge.yml");
+  fs.writeFileSync(merged, "defaults: &defaults\n  save: Save\nprofile:\n  <<: *defaults\n  stale: Supprime\n");
+  const mergedDoc = readLocaleDoc(merged, "fr");
+  const mergedOut = mergedDoc.serialize({ defaults: { save: "Save" }, profile: { save: "Save" } }, "fr");
+  assert.match(mergedOut, /profile:\n {2}<<: \*defaults\n {2}save: Save\n/, mergedOut);
+  assert.ok(!mergedOut.includes("stale"));
+});
+
 test("Rails-style YAML: single top-level key matching the locale tag is unwrapped, and rewrapped under the target's tag", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-yaml-rails-"));
   const file = path.join(root, "en.yml");
@@ -1612,6 +1664,20 @@ leading.space=[FR]  padded
   }, false);
   const rerun = doc.serialize(rebuilt, "fr", edited);
   assert.equal(rerun, edited);
+});
+
+test("Java .properties: a key dropped by buildTarget's isOrphaned pruning is removed from the file, not left as a blank `key=` (regression)", () => {
+  // Writing `key=` instead of deleting the line was worse than the pre-pruning
+  // behavior: Java finds the key and uses that empty string rather than falling back
+  // to the English default, whereas the old (unpruned) text at least showed something.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-properties-prune-"));
+  const file = path.join(root, "fr.properties");
+  fs.writeFileSync(file, "greeting=Bonjour\nold.key=Valeur supprimée\n");
+  const doc = readLocaleDoc(file, "fr");
+  // "old.key" is absent from the built target entirely — buildTarget already pruned
+  // it as orphaned, not just left it translated to "".
+  const out = doc.serialize({ greeting: "Bonjour" }, "fr");
+  assert.equal(out, "greeting=Bonjour\n");
 });
 
 test("Java .properties: a key whose source value uses \\uXXXX escapes keeps using them on write, instead of switching to raw UTF-8", () => {

@@ -477,11 +477,22 @@ export function flattenStrings(
  * Protecting a path that points at an object or array protects every string nested
  * under it too, which is what makes an enum array ("statusEnum": ["ACTIVE", ...])
  * protectable without enumerating each value as a doNotTranslate term.
+ *
+ * A configured key is dotted notation itself, so it's ambiguous the same way a real
+ * path is: `"brand.name"` could mean the nested pair `brand` → `name`, or a single flat
+ * key literally named `brand.name` (which `joinPath` escapes to `brand\.name`). Rather
+ * than require the caller to know which one they meant and escape it themselves, both
+ * readings are matched — the plain one (nested, the common case) and `k` escaped the
+ * same way `joinPath` would escape a flat key of that exact name.
  */
 export function keyPathProtect(doNotTranslateKeys: string[] | undefined): ((path: string) => boolean) | undefined {
   const keys = (doNotTranslateKeys ?? []).filter(Boolean);
   if (!keys.length) return undefined;
-  return (path: string) => keys.some((k) => path === k || path.startsWith(`${k}.`) || path.startsWith(`${k}[`));
+  const candidates = keys.flatMap((k) => {
+    const escaped = k.replace(/\\/g, "\\\\").replace(/\./g, "\\.");
+    return escaped === k ? [k] : [k, escaped];
+  });
+  return (path: string) => candidates.some((k) => path === k || path.startsWith(`${k}.`) || path.startsWith(`${k}[`));
 }
 
 /** A leaf string that needs (re)translation this run, with its key path. */

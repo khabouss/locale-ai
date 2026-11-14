@@ -128,6 +128,37 @@ export function saveLock(file: string, lock: LockFile): void {
 }
 
 /**
+ * Reverses `locales.ts`'s `joinPath` dot-escaping (`\.` → `.`, `\\` → `\`) to recover
+ * the path a pre-0.7.24 lock file would have stored for the same key — before a
+ * literal `.` within a key got escaped there to stop colliding with a nested key of
+ * the same dotted name. A path with no escaped character round-trips unchanged.
+ */
+function legacyPathFor(path: string): string {
+  return path.replace(/\\(.)/g, "$1");
+}
+
+/**
+ * Looks up `path`'s recorded pair, falling back to the pre-0.7.24 unescaped path when
+ * the (now-escaped) path itself has no entry — so upgrading from an older lock doesn't
+ * make every flat key with a literal `.` in its name look never-translated-but-already-
+ * filled (existing non-empty text, no staleness record) and silently stop tracking
+ * further source edits. On a fallback hit, the entry is copied onto the new, escaped
+ * key so later lookups (and the next save) find it directly; the old key is left for
+ * `pruneDeletedKeys` to drop on its own, since it no longer matches any current path.
+ */
+function lookupPair(lock: LockFile, fileKey: string, path: string, targetTag: string): { source: string; written: string } | undefined {
+  const key = entryKey(fileKey, path);
+  const direct = parsePair(lock.entries[key]?.[targetTag]);
+  if (direct) return direct;
+  const legacyPath = legacyPathFor(path);
+  if (legacyPath === path) return undefined;
+  const legacyValue = lock.entries[entryKey(fileKey, legacyPath)]?.[targetTag];
+  if (legacyValue === undefined) return undefined;
+  (lock.entries[key] ??= {})[targetTag] = legacyValue;
+  return parsePair(legacyValue);
+}
+
+/**
  * True when `path`'s source string in `fileKey` has changed, for `targetTag`
  * specifically, since that locale was last translated — meaning the existing
  * target text is stale and needs redoing even though it's non-empty. False
@@ -135,7 +166,7 @@ export function saveLock(file: string, lock: LockFile): void {
  * key, both already handled by the empty-target check).
  */
 export function isSourceStale(lock: LockFile, fileKey: string, path: string, targetTag: string, source: string): boolean {
-  const pair = parsePair(lock.entries[entryKey(fileKey, path)]?.[targetTag]);
+  const pair = lookupPair(lock, fileKey, path, targetTag);
   return pair !== undefined && pair.source !== hashOf(source);
 }
 
@@ -149,7 +180,7 @@ export function isSourceStale(lock: LockFile, fileKey: string, path: string, tar
  * as approved.
  */
 export function isEdited(lock: LockFile, fileKey: string, path: string, targetTag: string, currentValue: string): boolean {
-  const pair = parsePair(lock.entries[entryKey(fileKey, path)]?.[targetTag]);
+  const pair = lookupPair(lock, fileKey, path, targetTag);
   return pair !== undefined && pair.written !== hashOf(currentValue);
 }
 
