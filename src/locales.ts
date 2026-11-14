@@ -385,9 +385,16 @@ export function readLocaleDoc(file: string, tag: string, isSource = false, fuzzy
   return readJsonDoc(file, text);
 }
 
-/** A string needs translating when the target has no non-empty string at the same path. */
-const needsTranslation = (existing: unknown, overwrite: boolean) =>
-  overwrite || typeof existing !== "string" || existing === "";
+/**
+ * A string needs translating when the target has no non-empty string at the same
+ * path — unless the source itself is empty, in which case an empty target already
+ * matches it exactly. Without that exception, a legitimately blank source string
+ * (`""`) could never be marked done: its target is also always `""`, so every
+ * run would re-"translate" it forever, violating the "re-runs are a no-op"
+ * guarantee (silently, since there's nothing to actually write either way).
+ */
+const needsTranslation = (existing: unknown, source: string, overwrite: boolean) =>
+  overwrite || typeof existing !== "string" || (existing === "" && source !== "");
 
 /** Flattens a locale tree into key-path -> string-value pairs (for `locale-ai check`). */
 export function flattenStrings(
@@ -441,7 +448,7 @@ export function pendingEntries(
   const out: PendingEntry[] = [];
   const visit = (s: unknown, e: unknown, path: string): void => {
     if (typeof s === "string") {
-      if (!isProtected?.(path) && (needsTranslation(e, overwrite) || !!isStale?.(path, s))) out.push({ path, value: s });
+      if (!isProtected?.(path) && (needsTranslation(e, s, overwrite) || !!isStale?.(path, s))) out.push({ path, value: s });
     } else if (Array.isArray(s)) {
       s.forEach((v, i) => visit(v, Array.isArray(e) ? e[i] : undefined, `${path}[${i}]`));
     } else if (isObj(s)) {
@@ -483,7 +490,7 @@ export function buildTarget(
   const visit = (s: unknown, e: unknown, path: string): unknown => {
     if (typeof s === "string") {
       if (isProtected?.(path)) return s;
-      return needsTranslation(e, overwrite) || isStale?.(path, s) ? translate(s) : e;
+      return needsTranslation(e, s, overwrite) || isStale?.(path, s) ? translate(s) : e;
     }
     if (Array.isArray(s)) return s.map((v, i) => visit(v, Array.isArray(e) ? e[i] : undefined, `${path}[${i}]`));
     if (isObj(s)) {
