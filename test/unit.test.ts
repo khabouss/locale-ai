@@ -728,6 +728,48 @@ test("Android strings.xml: inline <xliff:g> markup survives a write, @string/ re
   assert.match(out, /<string name="leading_space">"  rembourré des deux côtés  "<\/string>/);
 });
 
+test("Android strings.xml: \\uXXXX escapes decode to the real character, and a leading \\@/\\? is re-escaped on write", () => {
+  // A generic "drop the backslash, keep the next char" unescape pass turns
+  // `Loading…` into the literal text `Loadingu2026` — the backslash is dropped
+  // but the `u2026` is kept as-is, rather than decoding to "Loading…". And a value
+  // that starts with a literal `@`/`?` must stay escaped (`\@`/`\?`) on write, or
+  // Android's aapt2 build tool parses it as a resource/style reference and fails.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-android-xml4-"));
+  const file = path.join(dir, "strings.xml");
+  const text = `<resources>
+    <string name="loading">Loading\\u2026</string>
+    <string name="mention">\\@mention a teammate</string>
+    <string name="help_ref">\\?attr/help</string>
+    <string name="real_ref">@string/app_name</string>
+</resources>
+`;
+  fs.writeFileSync(file, text);
+  const doc = readLocaleDoc(file, "en", true, false);
+  assert.equal(JSON.stringify(doc.data), JSON.stringify({
+    loading: "Loading…",
+    mention: "@mention a teammate",
+    help_ref: "?attr/help",
+  }));
+  // The true @string/ reference is never a translation candidate, same as before.
+  assert.equal(Object.prototype.hasOwnProperty.call(doc.data as object, "real_ref"), false);
+
+  const out = doc.serialize(
+    {
+      loading: "Chargement…",
+      mention: "@mention un coéquipier",
+      help_ref: "?attr/aide",
+    },
+    "fr",
+  );
+  // Written as the real character directly (valid UTF-8 strings.xml), not re-escaped —
+  // what matters is that it's the correct "…" character, not the corrupted "u2026" text.
+  assert.match(out, /<string name="loading">Chargement…<\/string>/);
+  assert.match(out, /<string name="mention">\\@mention un coéquipier<\/string>/);
+  assert.match(out, /<string name="help_ref">\\\?attr\/aide<\/string>/);
+  // Untouched true reference still round-trips byte-for-byte.
+  assert.match(out, /<string name="real_ref">@string\/app_name<\/string>/);
+});
+
 test("Android strings.xml: translatable='false' (single quotes) is honored, and an orphan commented-out <string> isn't read as live", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-android-xml3-"));
   const file = path.join(dir, "strings.xml");
@@ -913,6 +955,27 @@ test("YAML locale files: dir layout (mixed with JSON), file layout, and round-tr
   const fl = detectLayout(fileRoot, "en");
   assert.equal(fl.kind, "file");
   assert.equal(targetFile(fl, "en", "fr", sourceFiles(fl, "en")[0]), path.join(fileRoot, "fr.yml"));
+});
+
+test("YAML: a bare numeric key is updated in place, not duplicated as a second quoted pair", () => {
+  // YAML parses a bare `404:` as the JS *number* 404, while every key this tool's own
+  // pipeline passes back in (from Object.entries()) is always a *string* "404". Looking
+  // that up with Document#setIn's strict key-identity match misses the existing
+  // number-keyed pair entirely and inserts a second, "404"-quoted one next to it,
+  // leaving the original untranslated.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-yaml-numkey-"));
+  const file = path.join(root, "en.yaml");
+  fs.writeFileSync(file, "errors:\n  404: Not found\n  title: Errors\n  500: Server error\n");
+  const doc = readLocaleDoc(file, "en");
+  const translated = { errors: { "404": "FR:Not found", title: "FR:Errors", "500": "FR:Server error" } };
+  const out = doc.serialize(translated, "fr");
+  assert.equal((out.match(/404/g) ?? []).length, 1, "the numeric key appears exactly once, not duplicated");
+  assert.equal((out.match(/Not found/g) ?? []).length, 1, "the English value isn't left behind untranslated alongside the translated one");
+  assert.match(out, /404: FR:Not found/);
+
+  // Idempotent rerun over its own output: still no duplicate.
+  const again = doc.serialize(translated, "fr", out);
+  assert.equal((again.match(/404/g) ?? []).length, 1);
 });
 
 test("Rails-style YAML: single top-level key matching the locale tag is unwrapped, and rewrapped under the target's tag", () => {
@@ -1163,6 +1226,29 @@ test("Java .properties: a key whose source value uses \\uXXXX escapes keeps usin
   const existingFr = "greeting=Ancien\nplain=Ancien aussi\n";
   const rerun = doc.serialize({ greeting: "Nouveau café", plain: "Nouveau aussi" }, "fr", existingFr);
   assert.equal(rerun, "greeting=Nouveau café\nplain=Nouveau aussi\n");
+});
+
+test("Java .properties: an apostrophe is doubled when the value has a {0}-style MessageFormat placeholder, left alone otherwise", () => {
+  // java.text.MessageFormat (the usual way a `{0}`-placeholder resource string gets
+  // interpolated) treats a bare `'` as the start of a literal-quoted run whenever `{N}`
+  // syntax appears anywhere in the pattern; `''` is its documented escape for one
+  // literal apostrophe. Scoped to values with a `{N}` placeholder only — plain
+  // ResourceBundle.getString() does no substitution at all, so doubling an apostrophe
+  // in a value with no placeholder would just put a stray `''` in front of someone.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-properties-apostrophe-"));
+  const file = path.join(root, "en.properties");
+  fs.writeFileSync(file, "close=Cannot open {0}\nunavailable=Not available\n");
+  const doc = readLocaleDoc(file, "en", true);
+  assert.equal(JSON.stringify(doc.data), JSON.stringify({ close: "Cannot open {0}", unavailable: "Not available" }));
+
+  const out = doc.serialize({ close: "Impossible d'ouvrir {0}", unavailable: "Il n'est pas disponible" }, "fr");
+  assert.equal(out, "close=Impossible d''ouvrir {0}\nunavailable=Il n'est pas disponible\n");
+
+  // Round-trips back to the single-apostrophe form it started from.
+  fs.writeFileSync(path.join(root, "fr.properties"), out);
+  const rereadDoc = readLocaleDoc(path.join(root, "fr.properties"), "fr", true);
+  assert.equal((rereadDoc.data as Record<string, string>).close, "Impossible d'ouvrir {0}");
+  assert.equal((rereadDoc.data as Record<string, string>).unavailable, "Il n'est pas disponible");
 });
 
 test("XLIFF 1.2: detection via --input (untagged source), target filename convention, source-language mismatch is rejected", () => {
@@ -1877,6 +1963,44 @@ test("engine: an ambiguous literal-1 restore (source already has its own unrelat
   assert.equal(result.translations.get(source), "{{count}} of 1 total slots used (unfixed)");
 });
 
+test("engine: doNotTranslate is respected by the singular-grammar retry, not just the main pass", async () => {
+  // Both the i18next "_one" retry (fixSingularGrammar) and the ICU "one {...}" retry
+  // (fixIcuOneUnits) used to build their literal-"1" retranslation input straight from
+  // the source string, bypassing `opts.protect` entirely — so even though the MAIN pass
+  // correctly masked a doNotTranslate match like "Acme", the retry sent it to the model
+  // raw, and the model was then free to respell/recase it (observed for real: "Acme" ->
+  // "AKME", and a stray capital on "Сиденье"). The fix makes the retry's eligibility
+  // check protect-aware too, so any string containing BOTH the count placeholder/hash
+  // AND a protected term is disqualified from this narrow retry rather than leaking it.
+  const seenUnmasked: string[] = [];
+  const tr: Translator = {
+    translate: async (texts) => {
+      for (const t of texts) if (t.includes("Acme")) seenUnmasked.push(t);
+      return texts.map((s) => `FR:${s}`);
+    },
+    dispose: async () => {},
+  };
+
+  const i18nextSource = "{{count}} Acme seat";
+  await translateStrings([i18nextSource], [tr], {
+    sourceLang: "en",
+    targetLang: "fr",
+    batchSize: 4,
+    protect: /Acme/g,
+    singularHints: new Set([i18nextSource]),
+  });
+
+  const icuSource = "{n, plural, one {# Acme seat} other {# Acme seats}}";
+  await translateStrings([icuSource], [tr], {
+    sourceLang: "en",
+    targetLang: "fr",
+    batchSize: 4,
+    protect: /Acme/g,
+  });
+
+  assert.deepEqual(seenUnmasked, [], "the model never saw unmasked \"Acme\" in any call, main pass or retry");
+});
+
 test("custom models: config entries win over built-ins, prefixes per target", async () => {
   const { customEntries, resolveRoute, CATALOG } = await import("../src/catalog.ts");
   const custom = customEntries(
@@ -1945,6 +2069,67 @@ test("cleanupStalePartials: removes a .partial-<pid> dir left by a killed proces
   assert.equal(fs.existsSync(deadPartial), false, "the killed process's leftover dir is removed");
   assert.equal(fs.existsSync(livePartial), true, "a concurrent, still-running install's temp dir is left alone");
   assert.equal(fs.existsSync(otherModelPartial), true, "a different model's partial dir is never touched");
+});
+
+test("download: a full disk during a write rejects with ENOSPC instead of hanging forever or exiting silently", async () => {
+  // A write-stream that has already errored (e.g. ENOSPC) never emits 'drain' again,
+  // so code that awaits only 'drain' after a backpressured write hangs on that promise
+  // forever — and with nothing else keeping the event loop alive, Node then exits the
+  // whole process on its own, silently, with no thrown error and exit code 0. Writing
+  // to /dev/full (always ENOSPC on write) reproduces the real failure without needing
+  // an actually-full filesystem.
+  const origFetch = global.fetch;
+  global.fetch = (async () => ({
+    ok: true,
+    body: (async function* () {
+      for (let i = 0; i < 50; i++) yield new Uint8Array(1 << 20); // 50 x 1MB chunks
+    })(),
+  })) as typeof fetch;
+  try {
+    const mod = await import(`../src/models.ts?t=${Date.now()}-${Math.random()}`);
+    const file = { path: "x.bin", size: 50 * (1 << 20), gitSha1: "deadbeef" };
+    await assert.rejects(mod.download("http://example.invalid/x.bin", "/dev/full", file, () => {}), /ENOSPC|no space/i);
+  } finally {
+    global.fetch = origFetch;
+  }
+});
+
+test("HF_TOKEN is never sent to a spoofed HF_ENDPOINT host, only to the real huggingface.co", async () => {
+  // A substring check like `HF.includes("huggingface.co")` passes for both
+  // "https://huggingface.co.attacker.example" (a subdomain of attacker.example) and
+  // "https://attacker.example/huggingface.co" (the text appears, but only in the
+  // path) — either would leak HF_TOKEN to a third party. The fix compares the parsed
+  // hostname exactly instead.
+  const origFetch = global.fetch;
+  const origEndpoint = process.env.HF_ENDPOINT;
+  const origToken = process.env.HF_TOKEN;
+  let capturedHeaders: Record<string, string> | undefined;
+  global.fetch = (async (_url: string, opts: { headers: Record<string, string> }) => {
+    capturedHeaders = opts.headers;
+    return { ok: false, status: 404, json: async () => ({}) };
+  }) as unknown as typeof fetch;
+  try {
+    process.env.HF_TOKEN = "secret123";
+    for (const endpoint of ["https://huggingface.co.attacker.example", "https://attacker.example/huggingface.co"]) {
+      process.env.HF_ENDPOINT = endpoint;
+      const mod = await import(`../src/models.ts?t=${Date.now()}-${Math.random()}`);
+      capturedHeaders = undefined;
+      await assert.rejects(mod.planInstall({ id: "x", repo: "attacker/repo" } as never));
+      assert.equal(capturedHeaders?.authorization, undefined, `leaked token to spoofed endpoint ${endpoint}`);
+    }
+
+    delete process.env.HF_ENDPOINT;
+    const real = await import(`../src/models.ts?t=${Date.now()}-${Math.random()}`);
+    capturedHeaders = undefined;
+    await assert.rejects(real.planInstall({ id: "x", repo: "real/repo" } as never));
+    assert.equal(capturedHeaders?.authorization, "Bearer secret123", "the real huggingface.co should still get the token");
+  } finally {
+    global.fetch = origFetch;
+    if (origEndpoint === undefined) delete process.env.HF_ENDPOINT;
+    else process.env.HF_ENDPOINT = origEndpoint;
+    if (origToken === undefined) delete process.env.HF_TOKEN;
+    else process.env.HF_TOKEN = origToken;
+  }
 });
 
 test("SentencePiece encoder matches the reference segmentation (if a model is cached)", async (t) => {

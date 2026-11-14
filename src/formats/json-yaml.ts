@@ -33,7 +33,33 @@ function rewrapKey(doc: Document, tag: string): void {
 function setLeaves(doc: Document, base: Array<string | number>, v: unknown): void {
   if (Array.isArray(v)) v.forEach((item, i) => setLeaves(doc, [...base, i], item));
   else if (isObj(v)) for (const [k, val] of Object.entries(v)) setLeaves(doc, [...base, k], val);
-  else doc.setIn(base, v);
+  else setLeaf(doc, base, v);
+}
+
+/**
+ * `Document#setIn` matches an existing map pair by strict key equality, but every key
+ * `setLeaves` passes here comes from a plain JS object (`Object.keys`/array index),
+ * so it's always a string or a number *in JS's own sense* — never the YAML scalar
+ * node's own value, which for a bare `404:` is the actual number `404`, parsed from
+ * YAML's own type inference, not a string. `setIn` given the string `"404"` then
+ * doesn't recognize that number-404 pair as the same key and inserts a second,
+ * `"404":`-quoted one next to the original, untouched and still carrying the English
+ * text. Looked up by its string form first, so the existing pair (whichever JS type
+ * its key happens to be) is updated in place instead, and only a genuinely new key
+ * falls through to `setIn`.
+ */
+function setLeaf(doc: Document, base: Array<string | number>, v: unknown): void {
+  const last = base[base.length - 1];
+  const parent = doc.getIn(base.slice(0, -1), true);
+  if (isMap(parent)) {
+    const pair = parent.items.find((p) => String(isScalar(p.key) ? p.key.value : p.key) === String(last));
+    if (pair) {
+      if (isScalar(pair.value)) pair.value.value = v;
+      else pair.value = doc.createNode(v);
+      return;
+    }
+  }
+  doc.setIn(base, v);
 }
 
 /**
@@ -56,9 +82,11 @@ function reorderToMatch(doc: Document, base: Array<string | number>, v: unknown)
     const rank = (pair: { key: unknown }) => {
       // A pre-existing pair's key is a Scalar node; one `setIn` just created for a
       // brand-new key (exactly the case this function exists to fix) is still the
-      // plain string/number itself, not yet wrapped in one.
+      // plain string/number itself, not yet wrapped in one. Compared by string form
+      // (see `setLeaf`, above) since `order` — built from `Object.keys(v)` — only
+      // ever holds JS's own always-string keys, never a YAML-native number like 404.
       const k = isScalar(pair.key) ? pair.key.value : pair.key;
-      const i = typeof k === "string" ? order.indexOf(k) : -1;
+      const i = order.indexOf(String(k));
       return i < 0 ? order.length : i; // a key `v` doesn't have (never removed here) sorts last, stable among itself
     };
     node.items.sort((a, b) => rank(a) - rank(b));
