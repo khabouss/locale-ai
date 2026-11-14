@@ -686,6 +686,10 @@ test("Flutter's app_<locale>.arb filename prefix is detected, auto and via --inp
   fs.writeFileSync(path.join(root, "lib/l10n/app_en.arb"), '{"@@locale": "en", "hello": "Hi"}');
   fs.writeFileSync(path.join(root, "lib/l10n/app_fr.arb"), '{"@@locale": "fr", "hello": "Salut"}');
 
+  // No --input at all: lib/l10n is Flutter's own default, listed among the auto-detected candidates.
+  const auto = detectLayout(root, "en");
+  assert.deepEqual(auto, { kind: "file", root: path.join(root, "lib/l10n"), ext: ".arb", prefix: "app" });
+
   const l = detectLayout(root, "en", "lib/l10n");
   assert.deepEqual(l, { kind: "file", root: path.join(root, "lib/l10n"), ext: ".arb", prefix: "app" });
   assert.deepEqual(existingTargets(l, "en"), ["fr"]);
@@ -694,6 +698,17 @@ test("Flutter's app_<locale>.arb filename prefix is detected, auto and via --inp
   // Pointing --input directly at the source file itself also resolves it.
   const direct = detectLayout(root, "en", "lib/l10n/app_en.arb");
   assert.deepEqual(direct, { kind: "file", root: path.join(root, "lib/l10n"), ext: ".arb", prefix: "app" });
+});
+
+test("detectLayout: a Flutter project's unrelated top-level lib/ folder is never mistaken for a locale, even with --from wrong", () => {
+  // Regression: lib/ is Flutter's own source folder, not a locale directory — but its
+  // name happens to shape-match looksLikeLocale's loose 2-3-letter check, and before
+  // lib/l10n was an auto-detected candidate, a full recursive scan under "." found the
+  // unrelated lib/l10n/app_en.arb several levels down and wrongly suggested --from lib.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-flutter-nohint-"));
+  fs.mkdirSync(path.join(root, "lib/l10n"), { recursive: true });
+  fs.writeFileSync(path.join(root, "lib/l10n/app_en.arb"), '{"@@locale": "en", "hello": "Hi"}');
+  assert.throws(() => detectLayout(root, "de"), (e: Error) => !/did you mean --from lib/.test(e.message));
 });
 
 test("Apple's <locale>.lproj directory suffix is detected, auto and via --input", () => {

@@ -80,6 +80,7 @@ const CANDIDATES = [
   "app/i18n",
   "static/locales",
   "config/locales",
+  "lib/l10n",
   "app/src/main/res",
   "src/main/res",
   "res",
@@ -212,11 +213,26 @@ export function detectLayout(cwd: string, from: string, input?: string): Layout 
   );
 }
 
+/** True when `dir` directly contains at least one file with a tracked locale extension (not a deeper, unrelated nested one). */
+function hasLocaleFileDirectlyIn(dir: string): boolean {
+  return fs.readdirSync(dir, { withFileTypes: true }).some((e) => e.isFile() && EXTENSIONS.includes(path.extname(e.name).toLowerCase()));
+}
+
 /**
  * Scans the same candidate roots `detectLayout` just searched for `from`, for any OTHER
  * tag that looks like a locale and actually has content — so a non-English-source project
  * (the single most common reason this error fires) gets pointed at the right `--from`
  * instead of just being told what wasn't found.
+ *
+ * Checks only directly inside the candidate directory itself (`hasLocaleFileDirectlyIn`),
+ * not a full recursive `listLocaleFiles` scan: `parseLocale`'s shape-only check (any
+ * 2-3 letter name) makes `looksLikeLocale` pass for plenty of ordinary project folder
+ * names too — confirmed: Flutter's own top-level `lib/` happened to contain, several
+ * levels deep, an unrelated `lib/l10n/app_en.arb`, so a full recursive scan suggested
+ * `--from lib`. A genuine per-locale directory almost always has at least one file
+ * directly inside it even when it also has nested subdirectories (see `layoutAt`'s own
+ * `listLocaleFiles(dir).length > 0` check, which only ever runs on a path this function
+ * is about to suggest, not on an arbitrary unrelated ancestor).
  */
 function detectAlternateLocale(cwd: string, from: string): string | undefined {
   for (const c of CANDIDATES) {
@@ -225,7 +241,7 @@ function detectAlternateLocale(cwd: string, from: string): string | undefined {
     for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
       if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
       if (entry.isDirectory()) {
-        if (entry.name !== from && looksLikeLocale(entry.name) && listLocaleFiles(path.join(root, entry.name)).length > 0) {
+        if (entry.name !== from && looksLikeLocale(entry.name) && hasLocaleFileDirectlyIn(path.join(root, entry.name))) {
           return entry.name;
         }
         continue;
