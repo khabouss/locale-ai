@@ -771,6 +771,41 @@ test("Android strings.xml: \\uXXXX escapes decode to the real character, and a l
   assert.match(out, /<string name="real_ref">@string\/app_name<\/string>/);
 });
 
+test("Android strings.xml: a literal backslash is escaped on write, and an escaped backslash isn't mistaken for a \\uXXXX escape on read", () => {
+  // escapeAndroidXml never escaped a literal `\` at all: "Saved to C:\Temp" came out
+  // byte-for-byte the same, and Android's own unescaping then drops the backslash
+  // (its generic "unknown escape" rule), displaying "C:Temp". And unescapeAndroidXml's
+  // `\uXXXX` decode ran as its own separate pass before the generic backslash
+  // fallback, so it couldn't tell a real `\uXXXX` escape from an escaped backslash
+  // immediately followed by the literal text "uXXXX" (`\\u0041`, meaning one
+  // backslash then "u0041") — it matched starting at the second backslash and wrongly
+  // decoded that as U+0041 ("A"), leaving the first backslash to be eaten by the next
+  // pass. Both escapes are handled in one combined pass now.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-android-xml5-"));
+  const file = path.join(dir, "strings.xml");
+  const text = `<resources>
+    <string name="path">Saved to C:\\Temp</string>
+    <string name="literal_escape">Literal \\\\u0041</string>
+</resources>
+`;
+  fs.writeFileSync(file, text);
+  const doc = readLocaleDoc(file, "en", true, false);
+  assert.equal(JSON.stringify(doc.data), JSON.stringify({
+    path: "Saved to C:Temp",
+    literal_escape: "Literal \\u0041",
+  }));
+
+  const out = doc.serialize({ path: "Enregistre dans C:\\Temp", literal_escape: "Literal \\u0041" }, "fr");
+  assert.match(out, /<string name="path">Enregistre dans C:\\\\Temp<\/string>/);
+  assert.match(out, /<string name="literal_escape">Literal \\\\u0041<\/string>/);
+
+  // Round-trip: writing it back and reading it again recovers the exact original text.
+  fs.writeFileSync(path.join(dir, "fr.xml"), out);
+  const reread = readLocaleDoc(path.join(dir, "fr.xml"), "fr", true, false);
+  assert.equal((reread.data as Record<string, string>).path, "Enregistre dans C:\\Temp");
+  assert.equal((reread.data as Record<string, string>).literal_escape, "Literal \\u0041");
+});
+
 test("Android strings.xml: translatable='false' (single quotes) is honored, and an orphan commented-out <string> isn't read as live", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-android-xml3-"));
   const file = path.join(dir, "strings.xml");
@@ -977,6 +1012,49 @@ test("YAML: a bare numeric key is updated in place, not duplicated as a second q
   // Idempotent rerun over its own output: still no duplicate.
   const again = doc.serialize(translated, "fr", out);
   assert.equal((again.match(/404/g) ?? []).length, 1);
+});
+
+test("YAML: a merge key or a plain alias no longer crashes the whole file, and doesn't double-count its strings", () => {
+  // `Document#setIn`/`getIn` only walk through real Map/Seq nodes; an ordinary alias
+  // used as a pair's value (`profile: *common`) is an Alias node, not a collection, so
+  // writing anything under it used to throw "Expected YAML collection at profile" and
+  // abort the whole file with no target written, not a regression (0.7.13 and 0.7.17
+  // crash the same way). A Rails-style merge key (`<<: *defaults`) didn't crash, but
+  // without the `merge: true` schema option its `<<` subtree is read as an ordinary
+  // key holding its own nested copy of the merged-in strings — double-counting them
+  // alongside the anchor's own copy — instead of flattening straight into the map.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-yaml-alias-"));
+
+  // Plain alias: must not throw, and must produce a real (translatable) value.
+  const aliasFile = path.join(root, "alias.yaml");
+  fs.writeFileSync(aliasFile, "common: &common\n  save: Save\n  cancel: Cancel\n\nprofile: *common\n");
+  const aliasDoc = readLocaleDoc(aliasFile, "en");
+  assert.deepEqual(aliasDoc.data, { common: { save: "Save", cancel: "Cancel" }, profile: { save: "Save", cancel: "Cancel" } });
+  const aliasOut = aliasDoc.serialize(
+    { common: { save: "FR:Save", cancel: "FR:Cancel" }, profile: { save: "FR:Save", cancel: "FR:Cancel" } },
+    "fr",
+  );
+  assert.match(aliasOut, /profile:\n {2}save: FR:Save\n {2}cancel: FR:Cancel/);
+  // Idempotent rerun over its own output: still no crash, no drift.
+  assert.doesNotThrow(() =>
+    aliasDoc.serialize({ common: { save: "FR:Save", cancel: "FR:Cancel" }, profile: { save: "FR:Save", cancel: "FR:Cancel" } }, "fr", aliasOut),
+  );
+
+  // Merge key: `data` flattens straight through, no `<<` artifact and no double-counting.
+  const mergeFile = path.join(root, "merge.yaml");
+  fs.writeFileSync(mergeFile, "defaults: &defaults\n  save: Save\n  cancel: Cancel\n\nprofile:\n  <<: *defaults\n  title: Profile\n");
+  const mergeDoc = readLocaleDoc(mergeFile, "en");
+  assert.deepEqual(mergeDoc.data, {
+    defaults: { save: "Save", cancel: "Cancel" },
+    profile: { save: "Save", cancel: "Cancel", title: "Profile" },
+  });
+  assert.equal(Object.prototype.hasOwnProperty.call((mergeDoc.data as { profile: object }).profile, "<<"), false);
+  assert.doesNotThrow(() =>
+    mergeDoc.serialize(
+      { defaults: { save: "FR:Save", cancel: "FR:Cancel" }, profile: { save: "FR:Save", cancel: "FR:Cancel", title: "FR:Profile" } },
+      "fr",
+    ),
+  );
 });
 
 test("Rails-style YAML: single top-level key matching the locale tag is unwrapped, and rewrapped under the target's tag", () => {
@@ -1250,6 +1328,39 @@ test("Java .properties: an apostrophe is doubled when the value has a {0}-style 
   const rereadDoc = readLocaleDoc(path.join(root, "fr.properties"), "fr", true);
   assert.equal((rereadDoc.data as Record<string, string>).close, "Impossible d'ouvrir {0}");
   assert.equal((rereadDoc.data as Record<string, string>).unavailable, "Il n'est pas disponible");
+});
+
+test("Java .properties: a typed MessageFormat argument ({0,number,integer}) still triggers apostrophe-doubling, and intentional '{0}'-literal quoting is left alone", () => {
+  // The placeholder check only matched a bare `{0}`, not the extended
+  // `{0,number,integer}`/`{0,date}` forms — so an apostrophe next to one of those
+  // stayed single, and MessageFormat would eat it into a quoted run same as before
+  // the fix. Separately, `'{0}'` is MessageFormat's own documented way to show a
+  // placeholder's braces literally (no substitution) — blindly doubling every
+  // apostrophe turns that into `''{0}''`, which un-protects the placeholder instead
+  // of keeping it literal, exactly backwards from the intent.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-properties-typed-"));
+  const file = path.join(root, "en.properties");
+  fs.writeFileSync(file, "count=User has {0,number,integer} files\nliteral=Type {0} literally\n");
+  const doc = readLocaleDoc(file, "en", true);
+  assert.equal(
+    JSON.stringify(doc.data),
+    JSON.stringify({ count: "User has {0,number,integer} files", literal: "Type {0} literally" }),
+  );
+
+  const out = doc.serialize(
+    { count: "L'utilisateur a {0,number,integer} fichiers", literal: "Type '{0}' literally" },
+    "fr",
+  );
+  assert.equal(
+    out,
+    "count=L''utilisateur a {0,number,integer} fichiers\nliteral=Type '{0}' literally\n",
+  );
+
+  // Round-trips: the typed-arg apostrophe comes back single, the intentional quoting survives untouched.
+  fs.writeFileSync(path.join(root, "fr.properties"), out);
+  const reread = readLocaleDoc(path.join(root, "fr.properties"), "fr", true);
+  assert.equal((reread.data as Record<string, string>).count, "L'utilisateur a {0,number,integer} fichiers");
+  assert.equal((reread.data as Record<string, string>).literal, "Type '{0}' literally");
 });
 
 test("XLIFF 1.2: detection via --input (untagged source), target filename convention, source-language mismatch is rejected", () => {

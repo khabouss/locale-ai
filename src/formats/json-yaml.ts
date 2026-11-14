@@ -1,4 +1,4 @@
-import { Document, isMap, isScalar, parseDocument } from "yaml";
+import { Document, isAlias, isMap, isScalar, isSeq, parseDocument } from "yaml";
 import { finalNewline, isObj, type LocaleDoc, type Obj, withNewline } from "./shared.ts";
 
 export function readJsonDoc(file: string, text: string): LocaleDoc {
@@ -94,6 +94,45 @@ function reorderToMatch(doc: Document, base: Array<string | number>, v: unknown)
   for (const [k, val] of Object.entries(v)) reorderToMatch(doc, [...base, k], val);
 }
 
+/** True for a merge-key pair (`<<: *defaults`) parsed with the `merge: true` schema option — its key is a Scalar wrapping `Symbol("<<")`, not the literal string `"<<"`. */
+function isMergeKeyPair(pair: { key: unknown }): boolean {
+  return isScalar(pair.key) && typeof pair.key.value === "symbol" && pair.key.value.description === "<<";
+}
+
+/**
+ * `Document#setIn`/`getIn` only walk through real Map/Seq nodes — an ordinary alias
+ * used as a pair's value (`profile: *common`) throws `Expected YAML collection at
+ * profile` the moment `setLeaves` tries to write anything under it, since the node
+ * actually stored there is an `Alias`, not a collection. Replaces every such alias
+ * with an independent (anchor-stripped) clone of what it points to, so every path
+ * `setLeaves` walks is a real collection by the time it gets there. A merge-key pair
+ * (`<<: *defaults`) is left alone — that one already round-trips fine as-is (a new,
+ * independent leaf is added alongside it instead, same as any other new key), and
+ * resolving it here would inline the whole merged map in place of the `*defaults`
+ * reference, losing the point of writing it as a merge key at all.
+ */
+function resolveAliases(doc: Document, node: unknown): void {
+  if (isMap(node)) {
+    for (const item of node.items) {
+      if (isMergeKeyPair(item)) continue;
+      if (isAlias(item.value)) item.value = cloneDealiased(doc, item.value);
+      resolveAliases(doc, item.value);
+    }
+  } else if (isSeq(node)) {
+    node.items.forEach((v, i) => {
+      if (isAlias(v)) node.items[i] = cloneDealiased(doc, v);
+      resolveAliases(doc, node.items[i]);
+    });
+  }
+}
+
+function cloneDealiased(doc: Document, alias: { resolve(doc: Document): unknown }): unknown {
+  const target = alias.resolve(doc) as { clone?: () => unknown; anchor?: string } | undefined;
+  const cloned = target?.clone ? target.clone() : target;
+  if (cloned && typeof cloned === "object" && "anchor" in cloned) (cloned as { anchor?: string }).anchor = undefined;
+  return cloned;
+}
+
 /**
  * Rails and some other frameworks nest an entire YAML locale file under a single
  * top-level key matching the locale tag itself (`en:\n  hello: Hi`), so the file is
@@ -109,7 +148,7 @@ function reorderToMatch(doc: Document, base: Array<string | number>, v: unknown)
 export function readYamlDoc(file: string, text: string, tag: string): LocaleDoc {
   let srcDoc: Document;
   try {
-    srcDoc = parseDocument(text);
+    srcDoc = parseDocument(text, { merge: true });
   } catch (e) {
     throw new Error(`Invalid YAML in ${file}: ${(e as Error).message}`);
   }
@@ -124,7 +163,7 @@ export function readYamlDoc(file: string, text: string, tag: string): LocaleDoc 
     let base: Document | undefined;
     if (existingText !== undefined) {
       try {
-        const parsed = parseDocument(existingText);
+        const parsed = parseDocument(existingText, { merge: true });
         if (parsed.errors.length === 0) base = parsed;
       } catch {
         // Fall through to the source clone below.
@@ -132,6 +171,7 @@ export function readYamlDoc(file: string, text: string, tag: string): LocaleDoc 
     }
     base ??= srcDoc.clone();
     if (wrapped) rewrapKey(base, targetTag);
+    resolveAliases(base, base.contents);
     setLeaves(base, wrapped ? [targetTag] : [], d);
     reorderToMatch(base, wrapped ? [targetTag] : [], d);
     return withNewline(base.toString({ indent }), keepNewline);

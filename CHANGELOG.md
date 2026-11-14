@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.19
+
+Another external review, 4 confirmed bugs, verified with fresh reproductions against the real source before fixing ([khabouss/locale-ai#33](https://github.com/khabouss/locale-ai/issues/33)):
+
+- **A YAML anchor or alias crashed the whole file, writing nothing** — a plain alias used as a pair's value (`profile: *common`) threw `Error: Expected YAML collection at profile`, because `Document#setIn`/`getIn` only walk through real Map/Seq nodes and the node actually stored there is an `Alias`. Not a regression — 0.7.13 and 0.7.17 crash the same way. Every alias that stands in place of a collection is now replaced with an independent, anchor-stripped clone of what it points to before anything is written. A Rails-style merge key (`<<: *defaults`) didn't crash, but its `<<` subtree was read as an ordinary key holding its own nested copy of the merged-in strings, double-counting them alongside the anchor's own copy; parsing with the `yaml` package's `merge: true` option now flattens it straight into the map instead, and it's left untouched on write (a merge key already round-trips fine as-is).
+- **The apostrophe fix (0.7.18) missed typed MessageFormat arguments** — the placeholder check only matched a bare `{0}`, not `{0,number,integer}` or `{0,date}`, so an apostrophe next to one of those stayed single and `MessageFormat` would still eat the placeholder. The check now matches the full `{N[,FormatType[,FormatStyle]]}` shape.
+- **Intentional `'{0}'`-literal quoting was broken by the same apostrophe fix** — `Type '{0}' literally` (MessageFormat's own documented way to show a placeholder's braces literally, no substitution) was written as `Type ''{0}'' literally`, which un-protects the placeholder instead of keeping it literal — backwards from the intent. Apostrophes are now only doubled when they're *unbalanced* (an odd one out, like "don't"); a value whose quotes are already balanced is left exactly as written.
+- **Android never escaped a literal backslash on write** — `Saved to C:\Temp` round-tripped unchanged, and Android's own unescaping then drops the backslash (its "unknown escape" rule), displaying `C:Temp`. Not a regression. New in 0.7.18: the `\uXXXX` decode on read ran as its own pass before the generic backslash fallback, so it couldn't tell a real `\uXXXX` escape from an escaped backslash immediately followed by the literal text `uXXXX` (`\\u0041`, meaning one backslash then "u0041") — it matched starting at the second backslash, decoded that as `U+0041` ("A"), and left the first backslash to be eaten by the next pass. Both escapes are now handled in one combined pass.
+
 ## 0.7.18
 
 Another external review, 7 confirmed bugs plus one likely one, verified with fresh reproductions against the real source (not the reviewer's own scripts/clone) before fixing ([khabouss/locale-ai#31](https://github.com/khabouss/locale-ai/issues/31)):
