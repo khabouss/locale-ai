@@ -358,15 +358,24 @@ export function existingTargets(layout: Layout, from: string): string[] {
     .sort();
 }
 
+/** A locale file's byte-level text encoding, detected from its leading BOM (or lack of one). */
+export type TextEncoding = "utf16le-bom" | "utf16be-bom" | "utf8";
+
 /**
- * Decodes a locale file's raw bytes to text, detecting a UTF-16 BOM first — Xcode's
- * traditional default for `.strings` files, which `fs.readFileSync(file, "utf8")`
- * would otherwise mangle into unreadable text (and then "no entries found").
+ * Sniffs `buf`'s encoding from a leading BOM — Xcode's traditional default for
+ * `.strings` files is UTF-16 (either byte order), which plain UTF-8 decoding would
+ * otherwise mangle into unreadable text (and then "no entries found").
  */
-function readText(file: string): string {
-  const buf = fs.readFileSync(file);
-  if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) return buf.subarray(2).toString("utf16le");
-  if (buf.length >= 2 && buf[0] === 0xfe && buf[1] === 0xff) {
+export function detectEncoding(buf: Buffer): TextEncoding {
+  if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) return "utf16le-bom";
+  if (buf.length >= 2 && buf[0] === 0xfe && buf[1] === 0xff) return "utf16be-bom";
+  return "utf8";
+}
+
+/** Decodes `buf` as `enc` (see `detectEncoding`), stripping the BOM. */
+export function decodeText(buf: Buffer, enc: TextEncoding): string {
+  if (enc === "utf16le-bom") return buf.subarray(2).toString("utf16le");
+  if (enc === "utf16be-bom") {
     const swapped = Buffer.alloc(buf.length - 2);
     for (let i = 2; i + 1 < buf.length; i += 2) {
       swapped[i - 2] = buf[i + 1];
@@ -375,6 +384,30 @@ function readText(file: string): string {
     return swapped.toString("utf16le");
   }
   return buf.toString("utf8").replace(/^﻿/, "");
+}
+
+/**
+ * Re-encodes `text` as `enc`, the inverse of `decodeText` — used to write a target
+ * file back in whatever encoding it already had (a UTF-16 `.strings` file is never
+ * silently rewritten as UTF-8 just because this tool only ever produces JS strings
+ * internally). `enc === "utf8"` returns a plain string, so a caller that never deals
+ * with another encoding sees no change in type.
+ */
+export function encodeText(text: string, enc: TextEncoding): string | Buffer {
+  if (enc === "utf8") return text;
+  const body = Buffer.from(text, "utf16le");
+  if (enc === "utf16le-bom") return Buffer.concat([Buffer.from([0xff, 0xfe]), body]);
+  const swapped = Buffer.alloc(body.length);
+  for (let i = 0; i + 1 < body.length; i += 2) {
+    swapped[i] = body[i + 1];
+    swapped[i + 1] = body[i];
+  }
+  return Buffer.concat([Buffer.from([0xfe, 0xff]), swapped]);
+}
+
+function readText(file: string): string {
+  const buf = fs.readFileSync(file);
+  return decodeText(buf, detectEncoding(buf));
 }
 
 /**

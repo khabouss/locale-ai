@@ -15,7 +15,10 @@ import {
   addNestedPluralForms,
   addPluralForms,
   buildTarget,
+  decodeText,
+  detectEncoding,
   detectLayout,
+  encodeText,
   existingTargets,
   flattenStrings,
   isPluralCategoryPath,
@@ -1461,6 +1464,47 @@ test("Apple .strings: a UTF-16 (BOM) file is read like a UTF-8 one", () => {
   const be = path.join(root, "fr.strings");
   fs.writeFileSync(be, Buffer.concat([Buffer.from([0xfe, 0xff]), beBytes]));
   assert.equal(JSON.stringify(readLocaleDoc(be, "fr").data), '{"greeting":"Café!","farewell":"Goodbye"}');
+});
+
+test("detectEncoding/decodeText/encodeText: UTF-16LE and UTF-16BE BOMs round-trip, UTF-8 stays a plain string", () => {
+  const text = "café";
+  assert.equal(detectEncoding(Buffer.from(text, "utf8")), "utf8");
+  const plain = encodeText(text, "utf8");
+  assert.equal(typeof plain, "string", "utf8 is never wrapped in a Buffer");
+  assert.equal(plain, text);
+
+  const le = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(text, "utf16le")]);
+  assert.equal(detectEncoding(le), "utf16le-bom");
+  assert.equal(decodeText(le, "utf16le-bom"), text);
+  assert.deepEqual(encodeText(text, "utf16le-bom"), le);
+
+  const beBody = Buffer.from(text, "utf16le");
+  for (let i = 0; i + 1 < beBody.length; i += 2) [beBody[i], beBody[i + 1]] = [beBody[i + 1], beBody[i]];
+  const be = Buffer.concat([Buffer.from([0xfe, 0xff]), beBody]);
+  assert.equal(detectEncoding(be), "utf16be-bom");
+  assert.equal(decodeText(be, "utf16be-bom"), text);
+  assert.deepEqual(encodeText(text, "utf16be-bom"), be);
+});
+
+test("translate: a UTF-16 (BOM) .strings target keeps its own encoding instead of being rewritten as UTF-8", async () => {
+  // Regression: the existing target was read with a plain fs.readFileSync(file, "utf8")
+  // instead of the same BOM-aware decode every other read in this project uses — for a
+  // UTF-16 ".strings" file (Xcode's traditional default) that garbled "before" into
+  // mojibake, which never equaled the freshly serialized text, so even a no-op run
+  // rewrote the file from scratch as plain UTF-8, permanently losing its BOM/encoding.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-utf16-target-"));
+  fs.mkdirSync(path.join(dir, "en.lproj"));
+  fs.mkdirSync(path.join(dir, "fr.lproj"));
+  fs.writeFileSync(path.join(dir, "en.lproj/Localizable.strings"), '"hello" = "Hi";\n');
+  const frBefore = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('"hello" = "FR:Hi";\n', "utf16le")]);
+  const frFile = path.join(dir, "fr.lproj/Localizable.strings");
+  fs.writeFileSync(frFile, frBefore);
+
+  // Already fully translated and non-stale: no model needed, so this stays fast.
+  const result = await translate({ cwd: dir, from: "en", to: "fr", input: dir });
+  assert.equal(result.locales[0]!.stringsTranslated, 0);
+  assert.equal(result.locales[0]!.filesWritten, 0, "nothing actually changed: a no-op run never touches the file at all");
+  assert.deepEqual(fs.readFileSync(frFile), frBefore, "byte-for-byte unchanged, BOM included");
 });
 
 test("Java .properties: detection (bare and prefixed), region qualifier uses an underscore, not a hyphen", () => {

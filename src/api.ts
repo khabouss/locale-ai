@@ -22,6 +22,9 @@ import {
   buildTarget,
   detectLayout,
   existingTargets,
+  decodeText,
+  detectEncoding,
+  encodeText,
   flattenStrings,
   isPluralCategoryPath,
   keyPathProtect,
@@ -371,11 +374,17 @@ export async function translate(opts: TranslateOptions): Promise<TranslateResult
       for (const { path: p, conflict } of pluralEdited) {
         allIssues.push({ source: p, kind: conflict ? "conflict" : "edited", locale: job.locale.tag });
       }
-      const before = fs.existsSync(f.target) ? fs.readFileSync(f.target, "utf8") : undefined;
+      const targetBuf = fs.existsSync(f.target) ? fs.readFileSync(f.target) : undefined;
+      // Decoded (and, below, re-encoded) the same BOM-aware way as any other locale file
+      // read (see locales.ts's readText): a UTF-16 ".strings" target — Xcode's traditional
+      // default — was otherwise read as mangled UTF-8 and written back as plain UTF-8,
+      // permanently losing its original encoding on the very first translated run.
+      const targetEnc = targetBuf ? detectEncoding(targetBuf) : "utf8";
+      const before = targetBuf ? decodeText(targetBuf, targetEnc) : undefined;
       const text = f.doc.serialize(plural.doc, job.locale.tag, before);
       if (text !== before) {
         fs.mkdirSync(path.dirname(f.target), { recursive: true });
-        writeFileAtomic(f.target, text);
+        writeFileAtomic(f.target, encodeText(text, targetEnc));
         written++;
       }
       const outFlat = new Map(flattenStrings(plural.doc).map((e) => [e.path, e.value]));
