@@ -75,6 +75,17 @@ interface AndroidEntry {
   kind: "string" | "array" | "plural";
   /** For kind "string" only: the value was wrapped in a literal `"..."` pair in the source, which Android uses to preserve leading/trailing whitespace that would otherwise be trimmed — kept on write. */
   quoted?: boolean;
+  /** Any attributes besides `name`/`product`/`translatable` — most commonly `formatted="false"` (required once a value contains a bare `%s`/`%d` alongside other text, or aapt2's format check fails) and `tools:ignore="..."` (lint suppressions). Carried through verbatim since the tag is otherwise rebuilt from scratch on every write. */
+  extraAttrs?: string;
+}
+
+/** Everything in a `<string>`/`<string-array>`/`<plurals>` tag's attributes except the three handled specially (`name`, `product`, `translatable`) — e.g. `formatted="false"`, `tools:ignore="..."`. */
+function extraAttrsOf(attrsRaw: string): string {
+  return attrsRaw
+    .replace(/\s*\bname="[^"]*"/, "")
+    .replace(/\s*\btranslatable\s*=\s*["'][^"']*["']/, "")
+    .replace(/\s*\bproduct="[^"]*"/, "")
+    .trim();
 }
 
 /**
@@ -164,19 +175,20 @@ export function readAndroidXmlDoc(file: string, text: string): LocaleDoc {
     const product = /\bproduct="([^"]*)"/.exec(attrsRaw)?.[1];
     const key = dataKey(name, product, (nameCounts.get(name) ?? 0) > 1);
     const translatable = !/\btranslatable\s*=\s*["']false["']/.test(attrsRaw);
+    const extraAttrs = extraAttrsOf(attrsRaw) || undefined;
     if (tag === "string") {
       const trimmed = (inner ?? "").trim();
       const quoted = trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"');
       const value = unescapeAndroidXml(quoted ? trimmed.slice(1, -1) : trimmed);
       const isRef = ANDROID_REF_RE.test(value);
-      entries.push({ comment, name, product, translatable: translatable && !isRef, kind: "string", quoted });
+      entries.push({ comment, name, product, translatable: translatable && !isRef, kind: "string", quoted, extraAttrs });
       if (translatable && !isRef) data[key] = value;
     } else if (tag === "string-array") {
-      entries.push({ comment, name, product, translatable, kind: "array" });
+      entries.push({ comment, name, product, translatable, kind: "array", extraAttrs });
       const items = [...(inner ?? "").matchAll(/<item\b[^>]*>([\s\S]*?)<\/item>/g)].map((im) => unescapeAndroidXml(im[1].trim()));
       if (translatable) data[key] = items;
     } else {
-      entries.push({ comment, name, product, translatable, kind: "plural" });
+      entries.push({ comment, name, product, translatable, kind: "plural", extraAttrs });
       if (translatable) {
         const plural = newObj();
         for (const im of (inner ?? "").matchAll(/<item\s+quantity="(\w+)"[^>]*>([\s\S]*?)<\/item>/g)) {
@@ -205,7 +217,10 @@ export function readAndroidXmlDoc(file: string, text: string): LocaleDoc {
     const blocks: string[] = [];
     for (const e of entries) {
       const key = dataKey(e.name, e.product, (nameCounts.get(e.name) ?? 0) > 1);
-      const attr = (e.product !== undefined ? ` product="${escapeAndroidXml(e.product)}"` : "") + (e.translatable ? "" : ' translatable="false"');
+      const attr =
+        (e.product !== undefined ? ` product="${escapeAndroidXml(e.product)}"` : "") +
+        (e.extraAttrs ? ` ${e.extraAttrs}` : "") +
+        (e.translatable ? "" : ' translatable="false"');
       let tag: string;
       if (!e.translatable) {
         tag = (raw[key] as string).replace(/^<!--[\s\S]*?-->\s*\r?\n\s*/, "");

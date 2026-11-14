@@ -878,6 +878,27 @@ test("Android strings.xml: several product-qualified variants sharing one name k
   assert.equal([...out.matchAll(/<string name="title"/g)].length, 2, "both variants must survive, not collapse into one");
 });
 
+test("Android strings.xml: formatted=\"false\" and tools:ignore survive a rewrite instead of being dropped", () => {
+  // The tag is rebuilt from scratch on every write, with only name/product/translatable
+  // handled explicitly — any other attribute (formatted="false", required once a value mixes
+  // a bare %s/%d with other text or aapt2's format check fails; tools:ignore, a lint
+  // suppression) was silently lost.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-android-attrs-"));
+  const file = path.join(dir, "strings.xml");
+  fs.writeFileSync(
+    file,
+    `<resources>
+    <string name="progress" formatted="false">%1$d%% complete, %2$s remaining</string>
+    <string name="ignored" tools:ignore="UnusedResources">Unused but kept</string>
+</resources>
+`,
+  );
+  const doc = readLocaleDoc(file, "en", true, false);
+  const out = doc.serialize({ progress: "FR:%1$d%% complete, %2$s remaining", ignored: "FR:Unused but kept" });
+  assert.match(out, /<string name="progress" formatted="false">FR:/);
+  assert.match(out, /<string name="ignored" tools:ignore="UnusedResources">FR:/);
+});
+
 test("Apple .xcstrings: source extraction skips shouldTranslate=false/device variants, falls back to the key itself", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-xcstrings-"));
   const file = path.join(dir, "Localizable.xcstrings");
