@@ -31,6 +31,7 @@ const SOURCES = [
   /%(?:\d+\$)?[-+0#]*\d*(?:\.\d+)?[sdifuxXeEgGcpo@](?![A-Za-z])/.source, // %s %d %1$s %.2f %@ (not "100%off")
   /@(?:\.\w+)?:\(?[\w.-]+\)?/.source, // @:key @.lower:key  vue-i18n linked messages
   /\{\s*[\w.-]+\s*(?:,[^{}]*)?\}/.source, // {name} {0} {count, number}  ICU simple args
+  /'[{}]'/.source, // '{' '}'  MessageFormat's idiom for a literal brace with nothing else inside — too short/unusual on its own for a model to reliably carry through untouched (observed dropped or multiplied on a real hop), unlike '{0}'/'{name}', where the braces' own content is already protected by the ICU-args pattern above
   /<\/?[A-Za-z][\w.:-]*(?:\s[^<>]*)?\/?>/.source, // <b> </b> <a href="..."> <Trans/>
   /<\/?\s*\d+\s*\/?>/.source, // <0> </0> <1/>  react-i18next indexed components
   /&(?:[a-zA-Z][a-zA-Z0-9]*|#\d+|#x[0-9a-fA-F]+);/.source, // &nbsp; &#39;

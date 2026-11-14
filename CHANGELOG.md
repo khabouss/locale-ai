@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.22
+
+Fixes a third regression from 0.7.20, plus a related translation-safety gap, caught by re-testing 0.7.21 against a real fr/de model run ([khabouss/locale-ai#39](https://github.com/khabouss/locale-ai/issues/39)):
+
+- **Editing an already-translated key to add `''{0}''` was never picked up by a rerun** — `readPropertiesDoc`'s write path looked up which argument indices used the quoted-value idiom in the *existing target file*, not the source, so an edit like `The name {0} is already taken.` → `The name ''{0}'' is already taken.` kept writing the old, substitution-suppressing `'{0}'` form no matter how many times `translate` ran afterward (the target line never had `''{0}''` of its own to find). This is the normal way the case comes up — a team that fixes a message in place already has translated files. The lookup now always comes from the source's own `quotedArgKeys`; only the unrelated `\uXXXX`-vs-raw-UTF-8 convention still follows the target.
+- **A lone quoted brace (`'{'`) could be dropped or mangled by the translation model** — unlike `'{0}'`/`'{name}'`, whose content between the braces is already protected as a placeholder, a bare `'{'` had nothing recognizable for the masking pass to protect, so it reached the model as plain text (observed: a real en→fr hop dropped the brace and multiplied the quotes instead). It's now masked and restored verbatim like any other placeholder.
+
+**If you ran `translate` under 0.7.20**, any `''{0}''`-quoted message translated during that window was written as the wrong (substitution-suppressing) form, and neither `check`, a no-op rerun (the source hasn't changed), nor deleting the lock file will repair it — `translate` only re-translates when it detects something's changed. Delete the affected line(s) from the target file(s) (or the whole target file) and rerun `translate` to regenerate them correctly under this fix.
+
 ## 0.7.21
 
 Fixes two more regressions from 0.7.20's elision fix, caught by re-testing that release against a real fr/de model run ([khabouss/locale-ai#37](https://github.com/khabouss/locale-ai/issues/37)):
