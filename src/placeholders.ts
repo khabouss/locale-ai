@@ -20,6 +20,20 @@ export type Style = "natural" | "numeric" | "opaque";
 const NUMERIC_BASE = 900;
 const NUMERIC_RE_SRC = /(?<!\d)9\d\d(?!\d)/.source;
 
+/**
+ * A curly quote (“ ” ‘ ’) directly touching a placeholder. Masking only the
+ * placeholder itself and leaving these as ordinary surrounding text works for every
+ * other punctuation mark this project has tested against real models — but the
+ * Italian and German OPUS-MT models garble this specific quote-against-brace
+ * boundary even though they know the characters fine elsewhere in a sentence (seen on
+ * a real hop: `“{0}”` → `[55]{0} [56]`, `‘{0}’` → `‘{0} .`). Swallowing them into the
+ * SAME masked span as the placeholder sidesteps the boundary entirely, at no
+ * semantic cost: the exact matched text (quotes included) is restored verbatim
+ * either way, so it's harmless even where the quote isn't really "pairing" with the
+ * placeholder (an unrelated possessive `{0}’s`, say).
+ */
+const CURLY_QUOTE_SRC = "[“”‘’]";
+
 const SOURCES = [
   /_{1,3}\s?[Pp]\s?\d+\s?_{1,3}/.source, // text that looks like our own opaque markers
   /\{\{\{[^{}]*\}\}\}/.source, // {{{raw}}}
@@ -30,7 +44,8 @@ const SOURCES = [
   /%\([\w.]+\)[sdifr]/.source, // %(name)s  python
   /%(?:\d+\$)?[-+0#]*\d*(?:\.\d+)?[sdifuxXeEgGcpo@](?![A-Za-z])/.source, // %s %d %1$s %.2f %@ (not "100%off")
   /@(?:\.\w+)?:\(?[\w.-]+\)?/.source, // @:key @.lower:key  vue-i18n linked messages
-  /\{\s*[\w.-]+\s*(?:,[^{}]*)?\}/.source, // {name} {0} {count, number}  ICU simple args
+  CURLY_QUOTE_SRC + "?" + /\{\s*[\w.-]+\s*(?:,[^{}]*)?\}/.source + CURLY_QUOTE_SRC + "?", // {name} {0} {count, number}  ICU simple args, plus a directly-touching curly quote on either side (see CURLY_QUOTE_SRC)
+  /'[{}]'/.source, // '{' '}'  MessageFormat's idiom for a literal brace with nothing else inside — too short/unusual on its own for a model to reliably carry through untouched (observed dropped or multiplied on a real hop), unlike '{0}'/'{name}', where the braces' own content is already protected by the ICU-args pattern above
   /<\/?[A-Za-z][\w.:-]*(?:\s[^<>]*)?\/?>/.source, // <b> </b> <a href="..."> <Trans/>
   /<\/?\s*\d+\s*\/?>/.source, // <0> </0> <1/>  react-i18next indexed components
   /&(?:[a-zA-Z][a-zA-Z0-9]*|#\d+|#x[0-9a-fA-F]+);/.source, // &nbsp; &#39;

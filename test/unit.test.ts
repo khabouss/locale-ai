@@ -44,6 +44,18 @@ test("mask protects common placeholder syntaxes", () => {
     ["Mail support@acme.com or visit https://acme.com.", ["support@acme.com", "https://acme.com"]],
     ["The :attribute field is required", [":attribute"]],
     ["Tom&nbsp;&amp;&nbsp;Jerry", ["&nbsp;", "&amp;", "&nbsp;"]],
+    // MessageFormat's lone-literal-brace idiom ('{' / '}', nothing else inside) — too
+    // short/unusual on its own for a model to reliably carry through untouched (a real
+    // en->fr hop dropped the brace and multiplied the quotes). '{0}'/'{name}' don't
+    // need this: the content between their braces is already protected on its own by
+    // the ICU-args pattern above.
+    ["Use '{' to open a block in {0}", ["'{'", "{0}"]],
+    // A curly quote (“ ” ‘ ’) directly touching a placeholder — the Italian and
+    // German models garble this exact boundary on a real hop even though they
+    // handle the quote character fine elsewhere ("{0}" -> "[55]{0} [56]"). Masked
+    // together with the placeholder so the model never sees the raw boundary.
+    ["The file “{0}” was deleted.", ["“{0}”"]],
+    ["The file ‘{name}’ was deleted.", ["‘{name}’"]],
   ];
   for (const [input, expected] of cases) {
     assert.deepEqual(mask(input).tokens, expected, input);
@@ -1466,6 +1478,28 @@ test("Java .properties: ''{0}'' (quoted substituted value) round-trips distinctl
   assert.equal((reread.data as Record<string, string>).invalid, "La valeur '{0}' n'est pas valide.");
   assert.equal((reread.data as Record<string, string>).block, "Utilisez '{' pour ouvrir un bloc dans {0}");
   assert.equal((reread.data as Record<string, string>).named, "Écrivez '{name}' pour insérer {0}");
+});
+
+test("Java .properties: adding ''{0}'' to an already-translated message is picked up on the next rerun", () => {
+  // This is the normal way the ''{0}''-quoting fix actually gets used: a team edits a
+  // message to add the idiom to a key that was already translated under the OLD
+  // (plain `{0}`, or single-quoted) wording — so the target file that already exists
+  // has no `''{0}''` of its own for a rerun to find. The quoting convention is the
+  // SOURCE's call, not a per-target formatting preference (unlike \uXXXX vs raw
+  // UTF-8, which legitimately IS the target's own, and must still follow it) — so a
+  // rerun has to take it from the source's own quotedArgKeys every time, never from
+  // re-scanning the stale existing target text, or an edit like this would never take
+  // effect no matter how many times translate runs afterward.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-properties-rerun-quoting-"));
+  const enFile = path.join(root, "en.properties");
+  const frFile = path.join(root, "fr.properties");
+  fs.writeFileSync(frFile, "badname=Le nom {0} est déjà pris.\n");
+  fs.writeFileSync(enFile, "badname=The name ''{0}'' is already taken.\n");
+
+  const doc = readLocaleDoc(enFile, "en", true);
+  const existingFr = fs.readFileSync(frFile, "utf8");
+  const out = doc.serialize({ badname: "Le nom '{0}' est déjà pris." }, "fr", existingFr);
+  assert.equal(out, "badname=Le nom ''{0}'' est déjà pris.\n");
 });
 
 test("XLIFF 1.2: detection via --input (untagged source), target filename convention, source-language mismatch is rejected", () => {

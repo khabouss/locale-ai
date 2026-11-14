@@ -198,9 +198,16 @@ export function readPropertiesDoc(file: string, text: string): LocaleDoc {
   const { blocks, data, unicodeKeys, quotedArgKeys } = parsePropertiesBlocks(text);
   const serialize = (d: unknown, _targetTag: string, existingText?: string): string => {
     const obj = isObj(d) ? d : newObj();
-    const base = existingText !== undefined ? parsePropertiesBlocks(existingText) : { blocks, unicodeKeys, quotedArgKeys };
+    const base = existingText !== undefined ? parsePropertiesBlocks(existingText) : { blocks, unicodeKeys };
     const escapeFor = (k: string) => {
-      const args = base.quotedArgKeys.get(k);
+      // Which MessageFormat quoting idiom a placeholder uses is the SOURCE's call, not
+      // a per-target formatting preference like \uXXXX vs raw UTF-8 — so this always
+      // comes from the source's own quotedArgKeys, never the target's. Using the
+      // target's own (an existing bug) meant editing a message to add `''{0}''` and
+      // retranslating never actually fixed an already-translated key: the old target
+      // line had no `''{0}''` to detect, so the lookup stayed empty and the write
+      // path kept defaulting to the literal-braces idiom instead.
+      const args = quotedArgKeys.get(k);
       return (v: string) => (base.unicodeKeys.has(k) ? escapePropertiesUnicode(v, args) : escapeProperties(v, args));
     };
     const seen = new Set<string>();
