@@ -162,11 +162,16 @@ const TAG_PAIR_RE = /<([A-Za-z][\w.:-]*|\d+)(\s[^<>]*)?>([^<>]*)<\/\1\s*>/g;
 /** A capitalized single word or Title Case run ("Trailhead", "Trailhead Gear") — most likely a name, kept as it is. */
 const looksLikeName = (s: string) => /^\p{Lu}[\p{L}\p{N}'’-]*(?:\s+\p{Lu}[\p{L}\p{N}'’-]*)*$/u.test(s);
 
-/** Puts a standalone translation in its source text's case: a lowercase phrase mid-sentence stays lowercase ("politique de retour", not "Politique de retour" or "POLITIQUE DE RETOUR"). */
-function matchCase(src: string, t: string): string {
+/**
+ * Puts a standalone translation in its source text's case: a lowercase phrase
+ * mid-sentence stays lowercase ("politique de retour", not "Politique de retour" or
+ * "POLITIQUE DE RETOUR"). Except in German, where a capital is grammar — every noun
+ * has one — not sentence position ("Begriffsbestimmungen", never lowercased).
+ */
+function matchCase(src: string, t: string, targetLang: string): string {
   let r = t;
   if (isAllCaps(r) && !isAllCaps(src)) r = r.toLowerCase();
-  if (/^\p{Ll}/u.test(src)) r = r.charAt(0).toLowerCase() + r.slice(1);
+  if (/^\p{Ll}/u.test(src) && !/^de\b/.test(targetLang)) r = r.charAt(0).toLowerCase() + r.slice(1);
   else if (/^\p{Lu}/u.test(src)) r = r.charAt(0).toUpperCase() + r.slice(1);
   return r;
 }
@@ -276,7 +281,7 @@ async function fixUntranslatedTagTexts(units: Unit[], hops: Translator[], opts: 
         // A name is kept on purpose, so it's neither sent nor reported.
         if (!texts.includes(text) || looksLikeName(text)) return text;
         const raw = alone.get(prepare(text)) ?? "";
-        const t = raw && !isDegenerate(text, raw) ? matchCase(text, postprocess(text, raw, opts.targetLang)) : "";
+        const t = raw && !isDegenerate(text, raw) ? matchCase(text, postprocess(text, raw, opts.targetLang), opts.targetLang) : "";
         if (!t || t.toLowerCase() === text.toLowerCase()) {
           stillUntranslated = true;
           return text;

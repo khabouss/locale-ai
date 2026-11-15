@@ -81,6 +81,14 @@ test("mask protects common placeholder syntaxes", () => {
     // gettext python-format/c-format's escaped literal percent: collapsed to one "%" by
     // the model, it read as a broken directive and msgfmt -c rejected the catalog.
     ["Members get 10%% off, %(name)s.", ["%%", "%(name)s"]],
+    // .NET composite format / Python str.format with a format spec: "0:P0" without its
+    // braces printed literally (#80). ICU's {n, number, …} is still its own pattern.
+    ["Members get {0:P0} off, {0,10:N2} total, {price:.2f} each.", ["{0:P0}", "{0,10:N2}", "{price:.2f}"]],
+    ["{count, number, ::currency/EUR}", ["{count, number, ::currency/EUR}"]],
+    // A currency amount: the model "localized" €5 to $5 or 5 yuan (#81).
+    ["Price €5, or $9.99, or 5 €, or £1,299.00", ["€5", "$9.99", "5 €", "£1,299.00"]],
+    // A handle or Android resource reference — not an e-mail, vue's @:key, or %@ (#82).
+    ["Contact us @support or see @string/app_name, me@x.com, @:brand, %@", ["@support", "@string/app_name", "me@x.com", "@:brand", "%@"]],
   ];
   for (const [input, expected] of cases) {
     assert.deepEqual(mask(input).tokens, expected, input);
@@ -91,11 +99,11 @@ test("mask leaves ordinary text alone", () => {
   for (const s of [
     "100% sure",
     "Note: read this",
-    "Price $5",
     "a < b > c",
     "Hello world.",
     "Get 100%off today", // "%o" is not a stray printf spec glued onto "ff"
     "Price in $USD", // a currency code, not a "$name" placeholder
+    "an @ sign, 100% sure, version 2.0",
     "pay in $CAD or $USD",
   ]) {
     assert.deepEqual(mask(s).tokens, [], s);
@@ -3319,4 +3327,29 @@ test("translate: gettext entries that differ only by msgctxt but come back ident
   fs.writeFileSync(path.join(dir, "en.po"), po);
   const keys = Object.keys(readLocaleDoc(path.join(dir, "en.po"), "en", true).data as object);
   assert.ok(keys.every((k) => k.endsWith("\u0004Order")), "both entries are keyed by context + msgid");
+});
+
+test("Android: a value that was one CDATA section is written back as CDATA, with Android's backslash escapes (#83)", async () => {
+  const { readLocaleDoc } = await import("../src/locales.ts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-cdata-"));
+  fs.mkdirSync(path.join(dir, "values"));
+  const file = path.join(dir, "values/strings.xml");
+  fs.writeFileSync(
+    file,
+    `<resources>\n    <string name="link"><![CDATA[Visit <a href="https://example.com">our site</a> today]]></string>\n    <string name="plain">Read the <b>terms</b></string>\n</resources>\n`,
+  );
+  const doc = readLocaleDoc(file, "en", true);
+  assert.equal((doc.data as Record<string, string>).link, 'Visit <a href="https://example.com">our site</a> today');
+  const out = doc.serialize({ link: `Visitez <a href="https://example.com">notre site</a> aujourd'hui`, plain: "Lisez les <b>termes</b>" }, "fr");
+  // aapt2 still applies backslash escapes inside CDATA: an unescaped apostrophe fails the
+  // build, and a bare double quote is eaten as a quoting toggle (the href loses its quotes).
+  assert.match(out, /<string name="link"><!\[CDATA\[Visitez <a href=\\"https:\/\/example\.com\\">notre site<\/a> aujourd\\'hui\]\]><\/string>/);
+  assert.match(out, /<string name="plain">Lisez les <b>termes<\/b><\/string>/, "real markup stays markup");
+});
+
+test("engine: a German tag text keeps its capital even when its English source was lowercase (#84)", async () => {
+  const de: Record<string, string> = { "Read the <0>terms</0> first.": "Lesen Sie zuerst die <0>terms</0>.", terms: "Begriffsbestimmungen" };
+  const src = 'Read the <a href="/terms">terms</a> first.';
+  const { translations } = await translateStrings([src], [fakeTranslator((s) => de[s] ?? s)], { sourceLang: "en", targetLang: "de", batchSize: 4 });
+  assert.equal(translations.get(src), 'Lesen Sie zuerst die <a href="/terms">Begriffsbestimmungen</a>.');
 });
