@@ -60,6 +60,7 @@ const SOURCES = [
   /\{\{[^{}]*\}\}/.source, // {{name}}  i18next / vue / handlebars
   /\$t\([^)]*\)/.source, // $t(key)  i18next nesting
   /\$\{[^{}]*\}/.source, // ${name}
+  /%%/.source, // %%  an escaped literal percent in a printf/python-format string (gettext's `#, python-format` "10%% off") — collapsed to one "%" by the model, it reads as a broken directive and msgfmt -c rejects the catalog
   /%\{[^{}]+\}/.source, // %{name}  ruby / polyglot
   /%\([\w.]+\)[sdifr]/.source, // %(name)s  python
   /%(?:\d+\$)?[-+0#]*\d*(?:\.\d+)?[sdifuxXeEgGcpo@](?![A-Za-z])/.source, // %s %d %1$s %.2f %@ (not "100%off")

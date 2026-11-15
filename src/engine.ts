@@ -168,16 +168,22 @@ function matchCase(src: string, t: string): string {
  * ("Immer noch stecken? <strong>Chat with us</strong> oder…") — like an emptied pair,
  * a tag's content seems to read to the model as "keep this as it is", on any marker
  * style. A wholly untouched output isn't counted (that's the ordinary identical-to-
- * source case), nor is a protected term or a text holding a placeholder.
+ * source case).
+ *
+ * Only plain words qualify: a text holding anything the masker protects (a
+ * placeholder like `%(title)s`, an e-mail, a URL, a protected term) is skipped. Those
+ * come back unchanged because the model got them right — and `fixUntranslatedTagTexts`
+ * sends a text to the model raw, unmasked, so it came back as `%(titre)s` or
+ * `help@ejemplo.com`, breaking format strings and addresses.
  */
 function untranslatedTagTexts(src: string, out: string, protect?: RegExp): string[] {
   if (out.trim() === src.trim()) return [];
-  const isProtected = protect ? (t: string) => new RegExp(`^(?:${protect.source})$`, "u").test(t) : () => false;
   const srcPairs = [...src.matchAll(TAG_PAIR_RE)].map((m) => `${m[1]}\u0000${m[3].trim()}`);
   const found: string[] = [];
   for (const m of out.matchAll(TAG_PAIR_RE)) {
     const inner = m[3].trim();
-    if (srcPairs.includes(`${m[1]}\u0000${inner}`) && letters(inner).length >= 3 && !/[{}]/.test(inner) && !isProtected(inner)) found.push(inner);
+    if (!srcPairs.includes(`${m[1]}\u0000${inner}`) || letters(inner).length < 3) continue;
+    if (mask(inner, "natural", protect).tokens.length === 0) found.push(inner);
   }
   return found;
 }
