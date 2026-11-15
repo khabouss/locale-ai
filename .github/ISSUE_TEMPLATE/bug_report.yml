@@ -1,0 +1,67 @@
+name: Bug report
+description: A placeholder, tag or file came out broken, a build or check failed, or locale-ai crashed.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! The most useful reports show the exact source string and what came out — that's usually enough to reproduce it.
+        For a translation that's just *worded* badly, use the "Bad translation" template instead.
+  - type: input
+    id: version
+    attributes:
+      label: locale-ai version
+      description: Output of `npx locale-ai --version`.
+      placeholder: "0.7.31"
+    validations:
+      required: true
+  - type: dropdown
+    id: format
+    attributes:
+      label: File format
+      options:
+        - JSON (i18next / ICU / vue-i18n / next-intl)
+        - YAML (Rails / other)
+        - gettext .po / .pot
+        - Flutter ARB
+        - Apple .strings / .xcstrings
+        - Android strings.xml
+        - Java .properties
+        - XLIFF (Angular / other)
+        - .NET .resx
+        - JS/TS module
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: languages
+    attributes:
+      label: Languages
+      description: Source and target, as passed to `--from` / `--to`.
+      placeholder: "en → fr, de"
+  - type: textarea
+    id: source
+    attributes:
+      label: Source string(s)
+      description: The exact source text, including placeholders and markup. A few lines of the source file is ideal.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: What came out
+      description: The translated text, and any error from locale-ai or from your build (`ng build`, `compilemessages`, `aapt2`, ...).
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Node version, npm version.
+      placeholder: "macOS 15, Node 24.1, npm 11.2"

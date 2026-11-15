@@ -1,0 +1,49 @@
+name: Bad translation
+description: The output is structurally fine but the wording is wrong — wrong sense, wrong label, wrong plural form.
+labels: [translation-quality]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        locale-ai runs open OPUS-MT models, so some wording mistakes come from the model itself. Reports still help:
+        common UI labels go into the built-in glossary, and patterns (a word sense, a plural form, a language) shape the quality notes in the README.
+        A project-specific term can be fixed right away with `glossary` or `doNotTranslate` in `locale-ai.config.json`.
+  - type: input
+    id: version
+    attributes:
+      label: locale-ai version
+      placeholder: "0.7.31"
+    validations:
+      required: true
+  - type: input
+    id: languages
+    attributes:
+      label: Language pair
+      placeholder: "en → de"
+    validations:
+      required: true
+  - type: textarea
+    id: source
+    attributes:
+      label: Source text
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: locale-ai's translation
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: better
+    attributes:
+      label: A better translation
+      description: If you know one — it's what goes into the glossary.
+      render: text
+  - type: textarea
+    id: context
+    attributes:
+      label: Where it's used
+      description: A button, a heading, a sentence? Short labels are where models struggle most.
