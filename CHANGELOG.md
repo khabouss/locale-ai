@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.31
 
 - **`check`: an ICU option body that looks like an argument (`offset:1 =0 {Nobody}`) was compared as a placeholder** ([khabouss/locale-ai#69](https://github.com/khabouss/locale-ai/issues/69)) — every valid translation of it failed CI. A complex ICU message's placeholders are now compared run by run, as the model sees them.
 - **An XLIFF whose `source-language` is a regional variant of `--from` is accepted** ([khabouss/locale-ai#70](https://github.com/khabouss/locale-ai/issues/70)) — Angular's `extract-i18n` writes `en-US`, so the default `--from en` stopped the first run. (`.xcstrings` stays exact: its reader looks the tag up.)
