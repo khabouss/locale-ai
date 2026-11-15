@@ -211,11 +211,20 @@ export function readPropertiesDoc(file: string, text: string): LocaleDoc {
       return (v: string) => (base.unicodeKeys.has(k) ? escapePropertiesUnicode(v, args) : escapeProperties(v, args));
     };
     const seen = new Set<string>();
-    const lines = base.blocks.map((b) => {
-      if (!("key" in b)) return b.text;
+    const lines: string[] = [];
+    for (const b of base.blocks) {
+      if (!("key" in b)) {
+        lines.push(b.text);
+        continue;
+      }
       seen.add(b.key);
-      return `${b.prefix}${escapeFor(b.key)(typeof obj[b.key] === "string" ? (obj[b.key] as string) : "")}`;
-    });
+      // Absent from the built target entirely (not just translated to ""): its source
+      // key was deleted or renamed and buildTarget already pruned it — drop the line
+      // rather than writing `key=`, which would be worse than leaving the old text:
+      // Java finds the key and uses that empty value instead of falling back to English.
+      if (!(b.key in obj)) continue;
+      lines.push(`${b.prefix}${escapeFor(b.key)(typeof obj[b.key] === "string" ? (obj[b.key] as string) : "")}`);
+    }
     for (const k of Object.keys(obj)) {
       if (seen.has(k) || typeof obj[k] !== "string") continue;
       // Never-before-seen key: no target-side convention to follow, so fall back to the source's own.

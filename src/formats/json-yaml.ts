@@ -109,6 +109,33 @@ function isMergeKeyPair(pair: { key: unknown }): boolean {
 }
 
 /**
+ * Removes any map pair under `base` whose key isn't among `v`'s own keys at that same
+ * level — a source key deleted or renamed since the target was last written, which
+ * `buildTarget`'s `isOrphaned` already left out of `v`. Unlike the JSON writer (which
+ * builds its output from `v` alone, so a dropped key simply isn't there), this
+ * serializer edits the existing document in place and otherwise only ever sets or
+ * reorders paths `v` already has — nothing else here ever deletes a pair, so without
+ * this a pruned key stayed in the file forever. A merge-key pair is never swept up in
+ * this (its contents live in `v`'s siblings, not as a key of its own, per
+ * `reorderToMatch`'s comment above). Arrays are walked but never pruned by index —
+ * array elements aren't addressed by name, so there's no "this one was renamed" case
+ * to detect, only "shorter", which array-valued data already overwrites wholesale.
+ */
+function pruneExtra(doc: Document, base: Array<string | number>, v: unknown): void {
+  if (Array.isArray(v)) {
+    v.forEach((item, i) => pruneExtra(doc, [...base, i], item));
+    return;
+  }
+  if (!isObj(v)) return;
+  const node = doc.getIn(base);
+  if (isMap(node)) {
+    const keep = new Set(Object.keys(v));
+    node.items = node.items.filter((p) => isMergeKeyPair(p) || keep.has(String(isScalar(p.key) ? p.key.value : p.key)));
+  }
+  for (const [k, val] of Object.entries(v)) pruneExtra(doc, [...base, k], val);
+}
+
+/**
  * `Document#setIn`/`getIn` only walk through real Map/Seq nodes — an ordinary alias
  * used as a pair's value (`profile: *common`) throws `Expected YAML collection at
  * profile` the moment `setLeaves` tries to write anything under it, since the node
@@ -182,6 +209,7 @@ export function readYamlDoc(file: string, text: string, tag: string): LocaleDoc 
     if (wrapped) rewrapKey(base, targetTag);
     resolveAliases(base, base.contents);
     setLeaves(base, wrapped ? [targetTag] : [], d);
+    pruneExtra(base, wrapped ? [targetTag] : [], d);
     reorderToMatch(base, wrapped ? [targetTag] : [], d);
     return withNewline(base.toString({ indent }), keepNewline);
   };
