@@ -28,7 +28,15 @@ export interface EngineOptions {
   onProgress?: (done: number, total: number) => void;
 }
 
-export type IssueKind = "placeholder-fallback" | "suspicious-length" | "repetition" | "empty-tag" | "untranslated-tag" | "edited" | "conflict";
+export type IssueKind =
+  | "placeholder-fallback"
+  | "suspicious-length"
+  | "repetition"
+  | "empty-tag"
+  | "untranslated-tag"
+  | "context-ignored"
+  | "edited"
+  | "conflict";
 
 export interface Issue {
   source: string;
@@ -164,6 +172,32 @@ function matchCase(src: string, t: string): string {
 }
 
 /**
+ * Angular XLIFF's paired placeholders around a text — `<x id="START_LINK" …/>privacy
+ * policy<x id="CLOSE_LINK" …/>` — a pair in meaning, though each half is a self-closing
+ * element (a START id can carry a `_1` suffix; its CLOSE doesn't).
+ */
+const X_PAIR_RE = /(<x\s+id="START_([A-Z_]+?)(?:_\d+)?"[^<>]*\/>)([^<>]*)(<x\s+id="CLOSE_\2"[^<>]*\/>)/g;
+
+/** Each tag span's name and inner text: real open/close pairs and Angular's START/CLOSE placeholder pairs. */
+function tagSpans(s: string): Array<{ name: string; inner: string }> {
+  return [
+    ...[...s.matchAll(TAG_PAIR_RE)].map((m) => ({ name: m[1], inner: m[3].trim() })),
+    ...[...s.matchAll(X_PAIR_RE)].map((m) => ({ name: `x:${m[2]}`, inner: m[3].trim() })),
+  ];
+}
+
+/** Rewrites each tag span's inner text with `fn` (given it trimmed), keeping its surrounding whitespace and the tags themselves. */
+function mapTagSpans(s: string, fn: (text: string) => string): string {
+  const swap = (inner: string) => {
+    const text = inner.trim();
+    return text ? inner.replace(text, fn(text)) : inner;
+  };
+  return s
+    .replace(TAG_PAIR_RE, (m: string, _n: string, _a: string | undefined, inner: string) => m.replace(`>${inner}<`, `>${swap(inner)}<`))
+    .replace(X_PAIR_RE, (_m: string, open: string, _n: string, inner: string, close: string) => open + swap(inner) + close);
+}
+
+/**
  * Tag texts the model copied over unchanged while translating the rest of the string
  * ("Immer noch stecken? <strong>Chat with us</strong> oder…") — like an emptied pair,
  * a tag's content seems to read to the model as "keep this as it is", on any marker
@@ -178,14 +212,38 @@ function matchCase(src: string, t: string): string {
  */
 function untranslatedTagTexts(src: string, out: string, protect?: RegExp): string[] {
   if (out.trim() === src.trim()) return [];
-  const srcPairs = [...src.matchAll(TAG_PAIR_RE)].map((m) => `${m[1]}\u0000${m[3].trim()}`);
+  const srcSpans = tagSpans(src).map((t) => `${t.name}\u0000${t.inner}`);
   const found: string[] = [];
-  for (const m of out.matchAll(TAG_PAIR_RE)) {
-    const inner = m[3].trim();
-    if (!srcPairs.includes(`${m[1]}\u0000${inner}`) || letters(inner).length < 3) continue;
+  for (const { name, inner } of tagSpans(out)) {
+    if (!srcSpans.includes(`${name}\u0000${inner}`) || letters(inner).length < 3) continue;
     if (mask(inner, "natural", protect).tokens.length === 0) found.push(inner);
   }
   return found;
+}
+
+/** English function words a translated tag text shouldn't still contain ("Chat avec us", "دردش مع us"). */
+const EN_FUNCTION_WORDS = new Set(["the", "with", "us", "you", "your", "our", "and", "of", "for", "this", "that", "from", "here", "now", "my"]);
+
+const wordsOf = (s: string) => stripMarkers(s).toLowerCase().match(/\p{L}+/gu) ?? [];
+
+/**
+ * A tag text the model translated only partly: one that kept an English function word
+ * from its source ("<strong>Chat avec us</strong>"), or that is only a leftover subset
+ * of its source's words ("política <link>return</link>" for "<link>return policy</link>").
+ * Too ambiguous to rewrite (a cognate like "total" or "radio" is legitimate), so it's
+ * reported for review, never changed.
+ */
+function partlyUntranslatedTagText(src: string, out: string, targetLang: string): boolean {
+  if (/^en\b/.test(targetLang)) return false;
+  const srcSpans = tagSpans(src);
+  return tagSpans(out).some(({ name, inner }) => {
+    const source = srcSpans.find((t) => t.name === name);
+    if (!source || !inner || inner === source.inner || /[{}]/.test(inner)) return false;
+    const srcWords = new Set(wordsOf(source.inner));
+    const outWords = wordsOf(inner);
+    if (outWords.some((w) => EN_FUNCTION_WORDS.has(w) && srcWords.has(w))) return true;
+    return outWords.length > 0 && /^\p{Ll}/u.test(inner) && outWords.every((w) => srcWords.has(w));
+  });
 }
 
 /**
@@ -194,7 +252,9 @@ function untranslatedTagTexts(src: string, out: string, protect?: RegExp): strin
  * or "Chat with us" reads fine alone, and a translated phrase beats an English one.
  * A text that looks like a name is left alone and not reported (sent alone, it would
  * come back translated: "Trailhead" -> "Wegbereiter"). Whatever else is still
- * identical is reported for review.
+ * identical is reported for review, as is a text left only partly translated, or a
+ * tag pair the model emptied (Angular's START/CLOSE placeholder pairs included, which
+ * the in-sentence empty-tag check can't see: each half is its own self-closing tag).
  */
 async function fixUntranslatedTagTexts(units: Unit[], hops: Translator[], opts: EngineOptions, progress: Progress, issues: Issue[]): Promise<void> {
   const found = new Map<Unit, string[]>();
@@ -202,25 +262,32 @@ async function fixUntranslatedTagTexts(units: Unit[], hops: Translator[], opts: 
     const texts = u.result === undefined ? [] : untranslatedTagTexts(u.text, u.result, opts.protect);
     if (texts.length) found.set(u, texts);
   }
-  if (!found.size) return;
   const send = new Set([...found.values()].flat().filter((t) => !looksLikeName(t)).map(prepare));
-  const alone = await runModels(send, hops, opts, progress);
-  for (const [u, texts] of found) {
+  const alone = send.size ? await runModels(send, hops, opts, progress) : new Map<string, string>();
+  const report = (u: Unit, kind: IssueKind) => {
+    if (!issues.some((i) => i.source === u.owner && i.kind === kind)) issues.push({ source: u.owner, kind, output: u.result });
+  };
+  for (const u of units) {
+    if (u.result === undefined) continue;
+    const texts = found.get(u) ?? [];
     let stillUntranslated = false;
-    u.result = u.result!.replace(TAG_PAIR_RE, (m: string, _name: string, _attrs: string | undefined, inner: string) => {
-      const text = inner.trim();
-      if (!texts.includes(text)) return m;
-      // A name is kept on purpose, so it's neither sent nor reported.
-      if (looksLikeName(text)) return m;
-      const raw = alone.get(prepare(text)) ?? "";
-      const t = raw && !isDegenerate(text, raw) ? matchCase(text, postprocess(text, raw, opts.targetLang)) : "";
-      if (!t || t.toLowerCase() === text.toLowerCase()) {
-        stillUntranslated = true;
-        return m;
-      }
-      return m.replace(`>${inner}<`, `>${inner.replace(text, t)}<`);
-    });
-    if (stillUntranslated) issues.push({ source: u.owner, kind: "untranslated-tag", output: u.result });
+    if (texts.length) {
+      u.result = mapTagSpans(u.result, (text) => {
+        // A name is kept on purpose, so it's neither sent nor reported.
+        if (!texts.includes(text) || looksLikeName(text)) return text;
+        const raw = alone.get(prepare(text)) ?? "";
+        const t = raw && !isDegenerate(text, raw) ? matchCase(text, postprocess(text, raw, opts.targetLang)) : "";
+        if (!t || t.toLowerCase() === text.toLowerCase()) {
+          stillUntranslated = true;
+          return text;
+        }
+        return t;
+      });
+    }
+    const srcSpans = tagSpans(u.text);
+    const emptied = tagSpans(u.result).some(({ name, inner }) => !inner && letters(srcSpans.find((t) => t.name === name)?.inner ?? "").length > 0);
+    if (emptied) report(u, "empty-tag");
+    if (stillUntranslated || partlyUntranslatedTagText(u.text, u.result, opts.targetLang)) report(u, "untranslated-tag");
   }
 }
 

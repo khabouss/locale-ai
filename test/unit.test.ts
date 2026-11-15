@@ -3284,3 +3284,39 @@ test("built-in glossary covers common e-commerce labels (#76)", async () => {
   assert.equal(glossaryLookup(en, parseLocale("de"), {})("Shop"), "Shop");
   assert.equal(glossaryLookup(en, parseLocale("es"), {})("Cart"), "Carrito");
 });
+
+test("engine: an emptied Angular START/CLOSE placeholder pair is reported, and its text-left-English is fixed (#73)", async () => {
+  const start = (n: string) => `<x id="START_${n}" ctype="x-a" equiv-text="&lt;a&gt;"/>`;
+  const close = `<x id="CLOSE_LINK" ctype="x-a" equiv-text="&lt;/a&gt;"/>`;
+  const emptied = `By booking you agree to our ${start("LINK")}privacy policy${close}.`;
+  const english = `Read the ${start("LINK_1")}terms${close} first.`;
+  const es: Record<string, string> = {
+    "By booking you agree to our <0/>privacy policy<1/>.": "Al reservar acepta nuestras políticas de privacidad <0/> <1/>.",
+    "Read the <0/>terms<1/> first.": "Lea primero los <0/>terms<1/>.",
+    terms: "términos",
+  };
+  const { translations, issues } = await translateStrings([emptied, english], [fakeTranslator((s) => es[s] ?? s)], { sourceLang: "en", targetLang: "es", batchSize: 8 });
+  assert.deepEqual(issues.map((i) => `${i.kind}: ${i.source.slice(0, 15)}`), ["empty-tag: By booking you "]);
+  assert.equal(translations.get(english), `Lea primero los ${start("LINK_1")}términos${close}.`);
+});
+
+test("engine: a tag text left partly in English is reported, never rewritten; a cognate isn't (#74)", async () => {
+  const fr: Record<string, string> = {
+    "Still stuck? <0>Chat with us</0> today.": "Toujours bloqué ? <0>Chat avec us</0> aujourd'hui.",
+    "Read our <0>return policy</0> now.": "Lisez notre politique <0>return</0> maintenant.",
+    "Check the <0>total</0> below.": "Vérifiez le <0>total général</0> ci-dessous.",
+  };
+  const sources = ["Still stuck? <strong>Chat with us</strong> today.", "Read our <link>return policy</link> now.", "Check the <b>total</b> below."];
+  const { translations, issues } = await translateStrings(sources, [fakeTranslator((s) => fr[s] ?? s)], { sourceLang: "en", targetLang: "fr", batchSize: 8 });
+  assert.deepEqual(issues.map((i) => `${i.kind}: ${i.source}`).toSorted(), [`untranslated-tag: ${sources[1]}`, `untranslated-tag: ${sources[0]}`].toSorted());
+  assert.equal(translations.get(sources[0]), "Toujours bloqué ? <strong>Chat avec us</strong> aujourd'hui.", "reported, not rewritten");
+});
+
+test("translate: gettext entries that differ only by msgctxt but come back identical are reported (#75)", async () => {
+  const { readLocaleDoc } = await import("../src/locales.ts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-msgctxt-"));
+  const po = `msgid ""\nmsgstr ""\n"Content-Type: text/plain; charset=UTF-8\\n"\n\nmsgctxt "verb"\nmsgid "Order"\nmsgstr ""\n\nmsgctxt "noun"\nmsgid "Order"\nmsgstr ""\n`;
+  fs.writeFileSync(path.join(dir, "en.po"), po);
+  const keys = Object.keys(readLocaleDoc(path.join(dir, "en.po"), "en", true).data as object);
+  assert.ok(keys.every((k) => k.endsWith("\u0004Order")), "both entries are keyed by context + msgid");
+});
