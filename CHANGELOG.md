@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.29
 
 - **Text inside an inline tag was often left in English, and nothing reported it** ([khabouss/locale-ai#59](https://github.com/khabouss/locale-ai/issues/59)) — "Immer noch stecken? <strong>Chat with us</strong>", "Lisez notre <link>return policy</link>". A tag text the model copies over unchanged while translating the rest of the string is now translated on its own and put back inside its tag (in its source's case: "<link>politique de retour</link>"). A capitalized name ("<b>Trailhead</b>") is kept as it is; anything else still in English is reported as `untranslated-tag`.
 - **next-intl's `<link>…</link>` (and any other void-element name used as a rich-text tag) was masked as a broken pair** — `link` is an HTML void element, so `<link>` was read as self-closing and `</link>` as a stray closer, which no model could follow; the string fell through to the last-resort strategy with its link text left in English. A void name that's closed in the same string is now an ordinary open/close pair.
