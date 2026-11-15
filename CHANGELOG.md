@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.27
 
 - **Adding `locale-ai.config.json` after the first run silently dropped all change tracking** ([khabouss/locale-ai#53](https://github.com/khabouss/locale-ai/issues/53)) — the lock file lives next to the config file when there is one, otherwise in the locales folder, so adding a config (the README's own first step, for brand names) moved it to a new, empty lock. Existing translations then looked untracked: a source edit was never re-translated and `check` reported nothing stale. The old lock is now picked up, its file keys re-keyed relative to the new location, and moved next to the config on the next `translate`/`accept` (with a one-line notice); `check` reads it in place without writing anything.
 
