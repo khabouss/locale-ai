@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.32
 
 Found by running translated output through each platform's real toolchain — Android `aapt2`, a .NET 8 app with satellite assemblies, Flutter `gen-l10n` + `flutter test`, and Rails' `i18n` gem:
 
