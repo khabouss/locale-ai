@@ -28,7 +28,7 @@ export interface EngineOptions {
   onProgress?: (done: number, total: number) => void;
 }
 
-export type IssueKind = "placeholder-fallback" | "suspicious-length" | "repetition" | "empty-tag" | "edited" | "conflict";
+export type IssueKind = "placeholder-fallback" | "suspicious-length" | "repetition" | "empty-tag" | "untranslated-tag" | "edited" | "conflict";
 
 export interface Issue {
   source: string;
@@ -146,6 +146,76 @@ function isDegenerate(src: string, out: string): boolean {
     if (re.test(out) && !re.test(src)) return true;
   }
   return false;
+}
+
+/** An open/close tag pair — HTML, a rich-text tag like `<link>`, or an indexed `<0>` — and its inner text (no nested tags). */
+const TAG_PAIR_RE = /<([A-Za-z][\w.:-]*|\d+)(\s[^<>]*)?>([^<>]*)<\/\1\s*>/g;
+
+/** A capitalized single word or Title Case run ("Trailhead", "Trailhead Gear") — most likely a name, kept as it is. */
+const looksLikeName = (s: string) => /^\p{Lu}[\p{L}\p{N}'’-]*(?:\s+\p{Lu}[\p{L}\p{N}'’-]*)*$/u.test(s);
+
+/** Puts a standalone translation in its source text's case: a lowercase phrase mid-sentence stays lowercase ("politique de retour", not "Politique de retour" or "POLITIQUE DE RETOUR"). */
+function matchCase(src: string, t: string): string {
+  let r = t;
+  if (isAllCaps(r) && !isAllCaps(src)) r = r.toLowerCase();
+  if (/^\p{Ll}/u.test(src)) r = r.charAt(0).toLowerCase() + r.slice(1);
+  else if (/^\p{Lu}/u.test(src)) r = r.charAt(0).toUpperCase() + r.slice(1);
+  return r;
+}
+
+/**
+ * Tag texts the model copied over unchanged while translating the rest of the string
+ * ("Immer noch stecken? <strong>Chat with us</strong> oder…") — like an emptied pair,
+ * a tag's content seems to read to the model as "keep this as it is", on any marker
+ * style. A wholly untouched output isn't counted (that's the ordinary identical-to-
+ * source case), nor is a protected term or a text holding a placeholder.
+ */
+function untranslatedTagTexts(src: string, out: string, protect?: RegExp): string[] {
+  if (out.trim() === src.trim()) return [];
+  const isProtected = protect ? (t: string) => new RegExp(`^(?:${protect.source})$`, "u").test(t) : () => false;
+  const srcPairs = [...src.matchAll(TAG_PAIR_RE)].map((m) => `${m[1]}\u0000${m[3].trim()}`);
+  const found: string[] = [];
+  for (const m of out.matchAll(TAG_PAIR_RE)) {
+    const inner = m[3].trim();
+    if (srcPairs.includes(`${m[1]}\u0000${inner}`) && letters(inner).length >= 3 && !/[{}]/.test(inner) && !isProtected(inner)) found.push(inner);
+  }
+  return found;
+}
+
+/**
+ * Translates each tag text `untranslatedTagTexts` found on its own and puts it back
+ * inside its tag — out of its sentence's context, but a phrase like "return policy"
+ * or "Chat with us" reads fine alone, and a translated phrase beats an English one.
+ * A text that looks like a name is left alone and not reported (sent alone, it would
+ * come back translated: "Trailhead" -> "Wegbereiter"). Whatever else is still
+ * identical is reported for review.
+ */
+async function fixUntranslatedTagTexts(units: Unit[], hops: Translator[], opts: EngineOptions, progress: Progress, issues: Issue[]): Promise<void> {
+  const found = new Map<Unit, string[]>();
+  for (const u of units) {
+    const texts = u.result === undefined ? [] : untranslatedTagTexts(u.text, u.result, opts.protect);
+    if (texts.length) found.set(u, texts);
+  }
+  if (!found.size) return;
+  const send = new Set([...found.values()].flat().filter((t) => !looksLikeName(t)).map(prepare));
+  const alone = await runModels(send, hops, opts, progress);
+  for (const [u, texts] of found) {
+    let stillUntranslated = false;
+    u.result = u.result!.replace(TAG_PAIR_RE, (m: string, _name: string, _attrs: string | undefined, inner: string) => {
+      const text = inner.trim();
+      if (!texts.includes(text)) return m;
+      // A name is kept on purpose, so it's neither sent nor reported.
+      if (looksLikeName(text)) return m;
+      const raw = alone.get(prepare(text)) ?? "";
+      const t = raw && !isDegenerate(text, raw) ? matchCase(text, postprocess(text, raw, opts.targetLang)) : "";
+      if (!t || t.toLowerCase() === text.toLowerCase()) {
+        stillUntranslated = true;
+        return m;
+      }
+      return m.replace(`>${inner}<`, `>${inner.replace(text, t)}<`);
+    });
+    if (stillUntranslated) issues.push({ source: u.owner, kind: "untranslated-tag", output: u.result });
+  }
 }
 
 /** Runs unique inputs through every hop (pivot translation) in length-sorted batches. */
@@ -480,6 +550,7 @@ export async function translateStrings(
     if (pending.length) pending = await attempt(pending, style, hops, opts, progress, issues);
   }
   if (pending.length) await splitFallback(pending, hops, opts, progress, issues);
+  await fixUntranslatedTagTexts(units, hops, opts, progress, issues);
   if (plans.some((p) => p.oneUnitIndexes.length)) await fixIcuOneUnits(plans, hops, opts, progress);
 
   for (const p of plans) {

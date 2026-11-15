@@ -114,13 +114,23 @@ const VOID_TAGS = new Set(["br", "hr", "img", "input", "meta", "link", "wbr", "a
 
 type TagKind = { name: string; kind: "open" | "close" | "self" };
 
-export function tagKind(t: string): TagKind | undefined {
+/**
+ * Lowercased names of every closing tag in `text` — so a tag whose name is an HTML
+ * void element but that IS closed in the same string (next-intl's `<link>…</link>`
+ * rich-text convention) is read as an open/close pair, not as a self-closing
+ * `<link>` plus a stray `</link>`. Masked that way, no model could follow the broken
+ * pair (`<0/>return policy</1>`), and the string fell through to the last-resort
+ * strategy, which left its text in English.
+ */
+export const closedTagNames = (text: string) => new Set([...text.matchAll(/<\/\s*([A-Za-z0-9][\w.:-]*)\s*>/g)].map((m) => m[1].toLowerCase()));
+
+export function tagKind(t: string, closed?: Set<string>): TagKind | undefined {
   if (!/^<[^<>]+>$/.test(t)) return undefined; // merged spans are not a single tag
   const close = /^<\/\s*([A-Za-z0-9][\w.:-]*)\s*>$/.exec(t);
   if (close) return { name: close[1], kind: "close" };
   const open = /^<\s*([A-Za-z0-9][\w.:-]*)/.exec(t);
   if (!open || !t.endsWith(">")) return undefined;
-  if (t.endsWith("/>") || VOID_TAGS.has(open[1].toLowerCase())) return { name: open[1], kind: "self" };
+  if (t.endsWith("/>") || (VOID_TAGS.has(open[1].toLowerCase()) && !closed?.has(open[1].toLowerCase()))) return { name: open[1], kind: "self" };
   return { name: open[1], kind: "open" };
 }
 
@@ -148,6 +158,7 @@ export function mask(text: string, style: Style = "natural", protect?: RegExp): 
   let nextVar = 0;
   let nextTag = 0;
   const openTags: Array<{ name: string; id: number }> = [];
+  const closed = closedTagNames(text);
   let masked = "";
   let pos = 0;
   for (const { start, end } of spans) {
@@ -158,7 +169,7 @@ export function mask(text: string, style: Style = "natural", protect?: RegExp): 
     if (style === "opaque") marker = `_P${index}_`;
     else if (style === "numeric") marker = String(NUMERIC_BASE + index);
     else {
-      const tag = tagKind(m);
+      const tag = tagKind(m, closed);
       if (!tag) marker = `{${nextVar++}}`;
       else if (tag.kind === "self") marker = `<${nextTag++}/>`;
       else if (tag.kind === "open") {
@@ -226,10 +237,11 @@ export function unmask(translated: string, masked: Masked): string | undefined {
 
 /** For each tag name, the open/close sequence must match the source (no `</b>…<b>`). */
 function tagsInOrder(outputOrder: number[], tokens: string[]): boolean {
+  const closed = closedTagNames(tokens.join(""));
   const pattern = (order: number[]) => {
     const byName = new Map<string, string>();
     for (const i of order) {
-      const k = tagKind(tokens[i]);
+      const k = tagKind(tokens[i], closed);
       if (k && k.kind !== "self") byName.set(k.name, (byName.get(k.name) ?? "") + (k.kind === "open" ? "+" : "-"));
     }
     return [...byName].sort().join("|");
@@ -269,8 +281,9 @@ const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /** Removes spaces the model put inside tags ("<b> Terms</b>") when the source has none. */
 export function fixTagSpacing(source: string, output: string, tokens: string[]): string {
   let r = output;
+  const closed = closedTagNames(tokens.join(""));
   for (const t of new Set(tokens)) {
-    const kind = tagKind(t)?.kind;
+    const kind = tagKind(t, closed)?.kind;
     const e = escapeRe(t);
     if (kind === "open" && new RegExp(`${e}\\S`).test(source)) r = r.replace(new RegExp(`${e}[ \\t]+`, "g"), () => t);
     if (kind === "close" && new RegExp(`\\S${e}`).test(source)) r = r.replace(new RegExp(`[ \\t]+${e}`, "g"), () => t);
