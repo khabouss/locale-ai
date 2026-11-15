@@ -3244,3 +3244,12 @@ test("check: ICU option text that looks like an argument (=0 {Nobody}) isn't a p
   assert.deepEqual(mismatches.map((i) => i.path), ["broken"]);
   assert.ok(!mismatches[0]!.sourcePlaceholders.includes("{Nobody}"), "option text isn't listed as a placeholder");
 });
+
+test("detectLayout: an XLIFF whose source-language is a regional variant of --from is accepted (#70)", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-xlf-region-"));
+  const file = path.join(dir, "messages.xlf");
+  fs.writeFileSync(file, `<?xml version="1.0"?><xliff version="1.2"><file source-language="en-US" datatype="plaintext"><body></body></file></xliff>`);
+  assert.equal(detectLayout(dir, "en", file).kind, "xliff", "Angular's en-US with the default --from en");
+  assert.equal(detectLayout(dir, "en-US", file).kind, "xliff");
+  assert.throws(() => detectLayout(dir, "de", file), /has source-language "en-US", not "de"/);
+});
