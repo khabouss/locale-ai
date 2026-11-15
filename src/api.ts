@@ -460,6 +460,19 @@ export async function translate(opts: TranslateOptions): Promise<TranslateResult
         written++;
       }
       const outFlat = new Map(flattenStrings(plural.doc).map((e) => [e.path, e.value]));
+      // gettext entries that differ only by msgctxt exist precisely to get different
+      // translations ("Order" the verb vs the noun), but the model only ever sees the
+      // msgid, so they come back identical. Reported once, when translated this run.
+      const byMsgid = new Map<string, string[]>();
+      for (const { path: p } of srcFlat) {
+        const sep = p.indexOf("\u0004");
+        if (sep < 0 || !translatedSet.has(p)) continue;
+        const msgid = p.slice(sep + 1).replace(/\\(.)/g, "$1");
+        byMsgid.set(msgid, [...(byMsgid.get(msgid) ?? []), outFlat.get(p) ?? ""]);
+      }
+      for (const [msgid, outs] of byMsgid) {
+        if (outs.length > 1 && outs.every((o) => o === outs[0])) allIssues.push({ source: msgid, kind: "context-ignored", output: outs[0], locale: job.locale.tag });
+      }
       recordEntries(
         pending,
         lockKey,
