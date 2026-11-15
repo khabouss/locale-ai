@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
 import { withFileLock, writeFileAtomic } from "./fs-atomic.ts";
 
 /**
@@ -116,6 +117,23 @@ export function loadLock(file: string): LockFile {
       }
       if (Object.keys(mt).length) entries[entryKey(fk, p)] = mt;
     }
+  }
+  return { version: 3, entries };
+}
+
+/**
+ * Re-keys every entry's file key (relative to the lock's own directory) from
+ * `fromDir` to `toDir`, for a lock whose location moved — adding a
+ * `locale-ai.config.json` moves it next to the config file. Without this, moving
+ * the file alone still wouldn't match: `en/home.json` relative to `src/locales/`
+ * is `src/locales/en/home.json` relative to the project root.
+ */
+export function rebaseLock(lock: LockFile, fromDir: string, toDir: string): LockFile {
+  const entries: LockFile["entries"] = {};
+  for (const [key, tagMap] of Object.entries(lock.entries)) {
+    const i = key.indexOf("#");
+    const fk = path.relative(toDir, path.resolve(fromDir, key.slice(0, i))).split(path.sep).join("/");
+    entries[`${fk}${key.slice(i)}`] = tagMap;
   }
   return { version: 3, entries };
 }

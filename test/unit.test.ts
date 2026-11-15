@@ -10,7 +10,7 @@ import { translateStrings } from "../src/engine.ts";
 import { extractIcu } from "../src/icu.ts";
 import { extractPipePlural } from "../src/vue-plural.ts";
 import { parseLocale } from "../src/lang.ts";
-import { editedPaths, hashOf, isEdited, isSourceStale, loadLock, lockedPathsFor, pruneDeletedKeys, recordEntries, saveLock } from "../src/lock.ts";
+import { editedPaths, hashOf, isEdited, isSourceStale, loadLock, lockedPathsFor, pruneDeletedKeys, rebaseLock, recordEntries, saveLock } from "../src/lock.ts";
 import {
   addNestedPluralForms,
   addPluralForms,
@@ -31,7 +31,7 @@ import {
   targetFile,
   usesI18nextPlurals,
 } from "../src/locales.ts";
-import { check, translate } from "../src/api.ts";
+import { accept, check, translate } from "../src/api.ts";
 import type { Translator } from "../src/models.ts";
 import { hasTranslatableText, mask, unmask } from "../src/placeholders.ts";
 import { splitSentences } from "../src/segment.ts";
@@ -307,6 +307,77 @@ test("check/translate: a deleted/renamed source key is reported by check and pru
   assert.equal(translated.locales[0]!.stringsTranslated, 0, "both real keys already translated and non-stale: no model needed");
   const after = JSON.parse(fs.readFileSync(path.join(dir, "locales/fr.json"), "utf8"));
   assert.deepEqual(after, { greeting: "FR:Hello", farewell: "FR:Goodbye", manual_key: "Never a source key" });
+});
+
+test("lock: adding locale-ai.config.json after the first run keeps the lock's history instead of starting over (regression)", async () => {
+  // The lock lives next to the config file when there is one, otherwise in the layout
+  // root — so adding a config moved it to a new, empty lock, and a later source edit
+  // was silently ignored by translate and not reported stale by check.
+  const setup = () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-lockmove-"));
+    fs.mkdirSync(path.join(dir, "src/locales/en"), { recursive: true });
+    fs.mkdirSync(path.join(dir, "src/locales/fr"));
+    fs.writeFileSync(path.join(dir, "src/locales/en/home.json"), JSON.stringify({ cta: "Start your free trial", title: "Welcome" }));
+    fs.writeFileSync(path.join(dir, "src/locales/fr/home.json"), JSON.stringify({ cta: "Commencez votre essai gratuit", title: "Bienvenue" }));
+    fs.writeFileSync(
+      path.join(dir, "src/locales/locale-ai.lock.json"),
+      JSON.stringify({
+        version: 3,
+        entries: {
+          "en/home.json#cta": { fr: `${hashOf("Start your free trial")}:${hashOf("Commencez votre essai gratuit")}` },
+          "en/home.json#title": { fr: `${hashOf("Welcome")}:${hashOf("Bienvenue")}` },
+        },
+      }),
+    );
+    fs.writeFileSync(path.join(dir, "locale-ai.config.json"), JSON.stringify({ doNotTranslate: ["Northwind"] }));
+    return dir;
+  };
+  const oldLock = (dir: string) => path.join(dir, "src/locales/locale-ai.lock.json");
+  const newLock = (dir: string) => path.join(dir, "locale-ai.lock.json");
+
+  // check never writes: it reads the old lock's history, re-keyed, and leaves the file where it is.
+  const dir = setup();
+  fs.writeFileSync(path.join(dir, "src/locales/en/home.json"), JSON.stringify({ cta: "Start your 14-day free trial", title: "Welcome" }));
+  const checked = await check({ cwd: dir, from: "en" });
+  assert.deepEqual(checked.issues.filter((i) => i.kind === "stale").map((i) => (i as { path: string }).path), ["cta"]);
+  assert.ok(fs.existsSync(oldLock(dir)) && !fs.existsSync(newLock(dir)));
+
+  // A translate run with nothing to translate (the case that used to lose the history
+  // for good) moves the lock next to the config, re-keyed relative to its new folder.
+  const dir2 = setup();
+  const events: string[] = [];
+  const result = await translate({ cwd: dir2, from: "en", to: "fr", onEvent: (e) => events.push(e.type) });
+  assert.equal(result.locales[0]!.stringsTranslated, 0);
+  assert.equal(result.lockCreated, false, "a moved lock isn't reported as newly created");
+  assert.ok(events.includes("lock-moved"));
+  assert.ok(!fs.existsSync(oldLock(dir2)));
+  assert.deepEqual(Object.keys(loadLock(newLock(dir2)).entries).sort(), ["src/locales/en/home.json#cta", "src/locales/en/home.json#title"]);
+  fs.writeFileSync(path.join(dir2, "src/locales/en/home.json"), JSON.stringify({ cta: "Start your 14-day free trial", title: "Welcome" }));
+  const checked2 = await check({ cwd: dir2, from: "en" });
+  assert.deepEqual(checked2.issues.filter((i) => i.kind === "stale").map((i) => (i as { path: string }).path), ["cta"], "a later source edit is still tracked");
+
+  // accept moves it too, and a --dry-run translate never touches either file.
+  const dir3 = setup();
+  await translate({ cwd: dir3, from: "en", to: "fr", dryRun: true });
+  assert.ok(fs.existsSync(oldLock(dir3)) && !fs.existsSync(newLock(dir3)));
+  const accepted = await accept({ cwd: dir3, from: "en", to: "fr" });
+  assert.equal(accepted.lockMovedFrom, oldLock(dir3));
+  assert.ok(!fs.existsSync(oldLock(dir3)) && fs.existsSync(newLock(dir3)));
+
+  // An existing lock next to the config always wins: nothing is merged or moved.
+  const dir4 = setup();
+  fs.writeFileSync(newLock(dir4), JSON.stringify({ version: 3, entries: {} }));
+  await translate({ cwd: dir4, from: "en", to: "fr" });
+  assert.ok(fs.existsSync(oldLock(dir4)));
+});
+
+test("rebaseLock: re-keys each file key from one lock directory to another", () => {
+  const lock = { version: 3 as const, entries: { "en/home.json#a.b": { fr: "1:2" }, "../shared/en.json#x": { de: "3:4" } } };
+  const base = path.join(os.tmpdir(), "proj");
+  assert.deepEqual(rebaseLock(lock, path.join(base, "src/locales"), base).entries, {
+    "src/locales/en/home.json#a.b": { fr: "1:2" },
+    "src/shared/en.json#x": { de: "3:4" },
+  });
 });
 
 test("pendingStrings/buildTarget: a legitimately empty source string is not perpetually re-translated", () => {

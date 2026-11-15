@@ -15,7 +15,7 @@ import { writeFileAtomic } from "./fs-atomic.ts";
 import { glossaryLookup, loadConfig, protectRegex, type ProjectConfig } from "./glossary.ts";
 import { extractIcu, isIcuComplex } from "./icu.ts";
 import { intlCode, parseLocale, type Locale } from "./lang.ts";
-import { editedPaths, isEdited, isSourceStale, LOCK_FILENAME, loadLock, lockedPathsFor, mergeAndSaveLock, recordEntries, type LockFile } from "./lock.ts";
+import { editedPaths, isEdited, isSourceStale, LOCK_FILENAME, loadLock, lockedPathsFor, mergeAndSaveLock, rebaseLock, recordEntries, saveLock, type LockFile } from "./lock.ts";
 import {
   addNestedPluralForms,
   addPluralForms,
@@ -47,6 +47,29 @@ export function fullCatalog(config: ProjectConfig, cwd: string): ModelEntry[] {
 
 /** Portable lock-file key: forward slashes, relative to `base` (the lock file's own directory). */
 export const fileKey = (p: string, base: string) => path.relative(base, p).split(path.sep).join("/");
+
+/**
+ * The lock file's location and its history. It lives next to `locale-ai.config.json`
+ * when there is one, otherwise in the layout root — so adding a config file after the
+ * first run moves it. When the config's location has no lock yet but the layout root
+ * does, that history is used (re-keyed to the new location) instead of silently
+ * starting over: otherwise every existing translation looks untracked, source edits
+ * are never re-translated, and `check` reports nothing stale. With `persist`, the old
+ * file is moved there for good (translate/accept); `check` never writes, so it only
+ * reads it.
+ */
+function openLock(config: ProjectConfig, layout: Layout, persist: boolean): { lockDir: string; lockPath: string; lock: LockFile; movedFrom?: string } {
+  const lockDir = config.configFile ? path.dirname(config.configFile) : layout.root;
+  const lockPath = path.resolve(lockDir, LOCK_FILENAME);
+  const oldPath = path.resolve(layout.root, LOCK_FILENAME);
+  if (oldPath === lockPath || fs.existsSync(lockPath) || !fs.existsSync(oldPath)) return { lockDir, lockPath, lock: loadLock(lockPath) };
+  const lock = rebaseLock(loadLock(oldPath), layout.root, lockDir);
+  if (persist) {
+    saveLock(lockPath, lock);
+    fs.rmSync(oldPath);
+  }
+  return { lockDir, lockPath, lock, movedFrom: oldPath };
+}
 
 function staleNotEdited(lock: LockFile, lockKey: string, existing: unknown, targetTag: string): (p: string, s: string) => boolean {
   const existingFlat = new Map(flattenStrings(existing).map((e) => [e.path, e.value]));
@@ -97,7 +120,9 @@ export type TranslateEvent =
       durationMs: number;
       route: string[];
     }
-  | { type: "lock-created"; path: string };
+  | { type: "lock-created"; path: string }
+  /** The lock moved next to a newly added `locale-ai.config.json`, keeping its history (see `openLock`). */
+  | { type: "lock-moved"; from: string; to: string };
 
 export interface TranslateOptions {
   /** Defaults to `process.cwd()`. */
@@ -231,10 +256,9 @@ export async function translate(opts: TranslateOptions): Promise<TranslateResult
   const protect = protectRegex(config);
   const isProtectedKey = keyPathProtect(config.doNotTranslateKeys);
   const layout = detectLayout(cwd, from.tag, opts.input);
-  const lockDir = config.configFile ? path.dirname(config.configFile) : layout.root;
-  const lockPath = path.resolve(lockDir, LOCK_FILENAME);
+  const { lockDir, lockPath, lock, movedFrom } = openLock(config, layout, !opts.dryRun);
   const lockExisted = fs.existsSync(lockPath);
-  const lock = loadLock(lockPath);
+  if (movedFrom && !opts.dryRun) opts.onEvent?.({ type: "lock-moved", from: movedFrom, to: lockPath });
   const sources = sourceFiles(layout, from.tag).map((f) => ({ file: f, doc: readLocaleDoc(f, from.tag, true, opts.fuzzy ?? false) }));
   const singularHints = new Set(sources.flatMap(({ doc }) => [...pluralOneStrings(doc.data)]));
   opts.onEvent?.({ type: "found", layout, fromTag: from.tag, fileCount: sources.length });
@@ -470,8 +494,7 @@ export async function check(opts: CheckOptions = {}): Promise<CheckResult> {
   const from = parseLocale(opts.from ?? "en");
   const config = loadConfig(cwd, opts.config);
   const layout = detectLayout(cwd, from.tag, opts.input);
-  const lockDir = config.configFile ? path.dirname(config.configFile) : layout.root;
-  const lock = loadLock(path.resolve(lockDir, LOCK_FILENAME));
+  const { lockDir, lock } = openLock(config, layout, false);
   const sources = sourceFiles(layout, from.tag).map((f) => ({ file: f, doc: readLocaleDoc(f, from.tag, true) }));
   const targetTags = existingTargets(layout, from.tag);
 
@@ -570,6 +593,8 @@ export interface AcceptResult {
   /** Total keys accepted across all locales. */
   accepted: number;
   lockFile: string;
+  /** Where the lock was before this run moved it next to a newly added config file (see `openLock`). */
+  lockMovedFrom?: string;
 }
 
 /**
@@ -589,13 +614,11 @@ export async function accept(opts: AcceptOptions = {}): Promise<AcceptResult> {
   const from = parseLocale(opts.from ?? "en");
   const config = loadConfig(cwd, opts.config);
   const layout = detectLayout(cwd, from.tag, opts.input);
-  const lockDir = config.configFile ? path.dirname(config.configFile) : layout.root;
-  const lockPath = path.resolve(lockDir, LOCK_FILENAME);
-  const lock = loadLock(lockPath);
+  const { lockDir, lockPath, lock, movedFrom } = openLock(config, layout, true);
   const tags = opts.to
     ? (Array.isArray(opts.to) ? opts.to : [opts.to]).map((t) => parseLocale(t).tag)
     : existingTargets(layout, from.tag);
-  if (!tags.length) return { locales: [], accepted: 0, lockFile: lockPath };
+  if (!tags.length) return { locales: [], accepted: 0, lockFile: lockPath, lockMovedFrom: movedFrom };
   const wanted = opts.keys?.length ? new Set(opts.keys) : undefined;
   const sources = sourceFiles(layout, from.tag).map((f) => ({ file: f, doc: readLocaleDoc(f, from.tag, true) }));
 
@@ -620,5 +643,5 @@ export async function accept(opts: AcceptOptions = {}): Promise<AcceptResult> {
     }
   }
   mergeAndSaveLock(lockPath, pending);
-  return { locales: tags, accepted, lockFile: lockPath };
+  return { locales: tags, accepted, lockFile: lockPath, lockMovedFrom: movedFrom };
 }

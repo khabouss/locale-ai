@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.27
+
+- **Adding `locale-ai.config.json` after the first run silently dropped all change tracking** ([khabouss/locale-ai#53](https://github.com/khabouss/locale-ai/issues/53)) — the lock file lives next to the config file when there is one, otherwise in the locales folder, so adding a config (the README's own first step, for brand names) moved it to a new, empty lock. Existing translations then looked untracked: a source edit was never re-translated and `check` reported nothing stale. The old lock is now picked up, its file keys re-keyed relative to the new location, and moved next to the config on the next `translate`/`accept` (with a one-line notice); `check` reads it in place without writing anything.
+
 ## 0.7.26
 
 - **Upgrading from 0.7.23 still lost change tracking for a flat dotted key, after one run with nothing to translate** ([khabouss/locale-ai#51](https://github.com/khabouss/locale-ai/issues/51)) — 0.7.25's fallback to the old, unescaped lock path (`"menu.save"`) only migrated the entry in the lock loaded at the start of a run, but the save step re-reads the lock from disk and prunes paths that no longer exist, so the old entry was deleted with nothing written under the new escaped path (`"menu\.save"`). A later source edit on that key was then silently ignored, and `check` reported it clean. Pruning now renames such a legacy entry onto its escaped path instead of deleting it (an entry already recorded under the escaped path wins per locale; an ambiguous legacy path is still pruned), so the migration sticks on any run, including a no-op one.
