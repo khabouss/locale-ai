@@ -46,6 +46,14 @@ const CURLY_QUOTE_PAIR_SRC = `“${ICU_ARG_SRC}”|‘${ICU_ARG_SRC}’`;
 /** The exact set of curly quote characters either side of CURLY_QUOTE_PAIR_SRC can use — used by `stripCurlyQuotePair` below to undo that absorption when comparing placeholders across languages. */
 const CURLY_QUOTE_SRC = "[“”‘’]";
 
+/**
+ * En/em dash. Protected during translation like `©`, but a typographic choice
+ * rather than syntax: a translator writing "de {open} à {close}" or a plain "-"
+ * is legitimate, so `check` leaves dashes out of its placeholder comparison.
+ */
+const DASH_SRC = "[–—]";
+export const isDash = (token: string) => /^[–—]$/.test(token);
+
 const SOURCES = [
   /_{1,3}\s?[Pp]\s?\d+\s?_{1,3}/.source, // text that looks like our own opaque markers
   /\{\{\{[^{}]*\}\}\}/.source, // {{{raw}}}
@@ -55,6 +63,9 @@ const SOURCES = [
   /%\{[^{}]+\}/.source, // %{name}  ruby / polyglot
   /%\([\w.]+\)[sdifr]/.source, // %(name)s  python
   /%(?:\d+\$)?[-+0#]*\d*(?:\.\d+)?[sdifuxXeEgGcpo@](?![A-Za-z])/.source, // %s %d %1$s %.2f %@ (not "100%off")
+  /[\w.+-]+\{'@'\}[\w-]+(?:\.[\w-]+)+/.source, // hello{'@'}example.com  an e-mail address written with vue-i18n's literal @ (a bare @ is its linked-message syntax) — masked whole, so the address stays one unit
+  /@(?:\.\w+)?:\{'[^']*'\}/.source, // @:{'key'} @.lower:{'key'}  vue-i18n linked message, braced form
+  /\{'[^']*'\}/.source, // {'@'} {'{'} {'|'}  vue-i18n literal interpolation: how a special character is written as text
   /@(?:\.\w+)?:\(?[\w.-]+\)?/.source, // @:key @.lower:key  vue-i18n linked messages
   ICU_ARG_SRC, // {name} {0} {count, number}  ICU simple args
   CURLY_QUOTE_PAIR_SRC, // “{0}” or ‘{0}’  a matched pair of curly quotes wrapping a placeholder (see CURLY_QUOTE_PAIR_SRC)
@@ -68,6 +79,7 @@ const SOURCES = [
   /(?<=^|[\s(])(?::[a-zA-Z_]\w*)/.source, // :attribute  laravel
   /\$(?![A-Z]{2,}(?![a-zA-Z0-9_]))[A-Za-z_]\w*/.source, // $name (not "$USD", "$CAD" — currency codes)
   /[©®™]/.source, // copyright/registered/trademark symbols — models drop these on a second (pivoted) hop
+  DASH_SRC, // – —  en/em dash: the en-it model can't produce one, and drops it or emits garbage ("{0} [49] {1}", "{0} € {1}") — see isDash
 ];
 
 const PLACEHOLDER_SRC = SOURCES.map((s) => `(?:${s})`).join("|");

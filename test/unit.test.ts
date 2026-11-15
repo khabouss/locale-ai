@@ -72,6 +72,12 @@ test("mask protects common placeholder syntaxes", () => {
     // XML itself) — masked as one unit, not split into "&lt;" + a bare, unprotected
     // tag name + "&gt;" by the generic entity-reference pattern below it.
     ["Use &lt;b&gt; tags to bold text.", ["&lt;b&gt;"]],
+    // vue-i18n literal interpolation — how a special character is written as text.
+    // Unprotected, real models rewrote it ("hello.cafe.fr", "& quot؛", "‘brand’").
+    ["Use {'|'} to separate {'{'} and {'}'}", ["{'|'}", "{'{'}", "{'}'}"]],
+    ["Welcome to @:{'brand'}. Or @.upper:{'brand'}", ["@:{'brand'}", "@.upper:{'brand'}"]],
+    // An e-mail address written with the literal @ stays one unit, not "hello" + "{'@'}" + "harbor.cafe".
+    ["Email hello{'@'}harbor.cafe or call {0}.", ["hello{'@'}harbor.cafe", "{0}"]],
   ];
   for (const [input, expected] of cases) {
     assert.deepEqual(mask(input).tokens, expected, input);
@@ -98,6 +104,33 @@ test("© / ® / ™ symbols are masked so a pivoted (two-hop) translation can't 
   assert.deepEqual(m.tokens, ["©"]);
   assert.equal(unmask("{0} 2026 Acme. Tous droits réservés.", m), "© 2026 Acme. Tous droits réservés.");
   assert.deepEqual(mask("Acme® and AcmePro™").tokens, ["®", "™"]);
+});
+
+test("en/em dashes are masked so a model that can't produce one doesn't replace it with garbage", () => {
+  // The en-it model turned "{open} – {close}" into "{open} [49] {close}" / "{open} € {close}".
+  const m = mask("Monday to Friday: {open} – {close}");
+  assert.deepEqual(m.tokens, ["{open}", "–", "{close}"]);
+  assert.equal(unmask("Dal lunedì al venerdì: {0} {1} {2}", m), "Dal lunedì al venerdì: {open} – {close}");
+  assert.deepEqual(mask("Fast — and free. Pages 10–20.").tokens, ["—", "–"]);
+  assert.deepEqual(mask("A well-known, state-of-the-art tool").tokens, [], "a plain hyphen is ordinary text");
+});
+
+test("check: a lost vue-i18n literal fails, but a translator's own range wording instead of a dash doesn't", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-vue-dash-"));
+  fs.mkdirSync(path.join(dir, "locales"));
+  fs.writeFileSync(
+    path.join(dir, "locales/en.json"),
+    JSON.stringify({ contact: "Email hello{'@'}harbor.cafe", hours: "Monday to Friday: {open} – {close}" }),
+  );
+  fs.writeFileSync(
+    path.join(dir, "locales/fr.json"),
+    JSON.stringify({ contact: "Écrivez à hello.cafe.fr", hours: "Du lundi au vendredi, de {open} à {close}" }),
+  );
+  const checked = await check({ cwd: dir, from: "en" });
+  assert.deepEqual(
+    checked.issues.filter((i) => i.kind === "placeholder-mismatch").map((i) => (i as { path: string }).path),
+    ["contact"],
+  );
 });
 
 test("natural markers: {n} for variables, <n>…</n> for tags", () => {

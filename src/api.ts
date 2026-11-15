@@ -38,7 +38,7 @@ import {
   type LocaleDoc,
 } from "./locales.ts";
 import { install, isInstalled, loadTranslator, localModelProblem, planInstall, type InstallPlan, type Translator } from "./models.ts";
-import { hasTranslatableText, mask, stripCurlyQuotePair } from "./placeholders.ts";
+import { hasTranslatableText, isDash, mask, stripCurlyQuotePair } from "./placeholders.ts";
 
 /** Built-in models plus the project's own config (which take priority) — same resolution `cli.ts` uses. */
 export function fullCatalog(config: ProjectConfig, cwd: string): ModelEntry[] {
@@ -553,8 +553,9 @@ export async function check(opts: CheckOptions = {}): Promise<CheckResult> {
         // away — none of that is a real placeholder mismatch (see stripCurlyQuotePair).
         // Strip before sorting: sorting the raw (quote-including) tokens first could
         // order a quoted source token differently from its unquoted target counterpart.
-        const srcKey = srcMasked.tokens.map(stripCurlyQuotePair).toSorted().join("\u0001");
-        const tgtKey = tgtMasked.tokens.map(stripCurlyQuotePair).toSorted().join("\u0001");
+        // Dashes are protected during translation but are typography, not syntax (see isDash).
+        const srcKey = srcMasked.tokens.filter((t) => !isDash(t)).map(stripCurlyQuotePair).toSorted().join("\u0001");
+        const tgtKey = tgtMasked.tokens.filter((t) => !isDash(t)).map(stripCurlyQuotePair).toSorted().join("\u0001");
         if (srcKey !== tgtKey) {
           mismatched++;
           issues.push({ locale: to, kind: "placeholder-mismatch", target, path: p, sourcePlaceholders: srcTokens, targetPlaceholders: tgtTokens });

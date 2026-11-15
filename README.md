@@ -113,7 +113,7 @@ Run it again and nothing happens. Add or edit a key and only that key is transla
 
 Formats can be mixed in one project. Common folders (`locales`, `src/locales`, `public/locales`, `src/i18n`, `messages`, `lang`, `config/locales`, `lib/l10n`, ...) are found automatically, or pass `--input`. Per-format details, including what survives a rerun, are in **[docs/formats.md](docs/formats.md)**.
 
-- **Placeholders are never translated or lost**: `{name}`, `{{count}}`, `%s`, `%1$s`, `%(name)s`, `%{name}`, `${name}`, `:attribute`, `$t(key)`, `@:key`, `<b>…</b>`, `<0>…</0>`, `&nbsp;`, URLs, e-mails, and `©`/`®`/`™`. No config needed.
+- **Placeholders are never translated or lost**: `{name}`, `{{count}}`, `%s`, `%1$s`, `%(name)s`, `%{name}`, `${name}`, `:attribute`, `$t(key)`, `@:key`, vue-i18n literals like `{'@'}`, `<b>…</b>`, `<0>…</0>`, `&nbsp;`, URLs, e-mails, and `©`/`®`/`™`/`–`/`—`. No config needed.
 - **ICU MessageFormat**: `{count, plural, one {# file} other {# files}}`, `select`, nesting. Only the text is translated.
 - **Plurals**: adds the forms the target language needs (`_few`, `_many` for Arabic, Russian, Polish...) so the app doesn't fall back to English. Each added form copies the `_other` translation rather than inflecting it, so review `_zero`/`_two`/`_few`/`_many` by hand where those use a different word form. Works the same for i18next suffixes, Rails nested plurals, Android `<plurals>`, gettext and `.xcstrings`.
 - **Structure**: key order, numbers, booleans, arrays, indentation and trailing newline are preserved.
