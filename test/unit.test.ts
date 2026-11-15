@@ -3177,11 +3177,12 @@ test("translate: a tool-written string whose placeholders no longer match the so
   // never a complex ICU message, never one that's fine.
   assert.equal(result.dryRun![0]!.pending, 2);
 
-  // check still reports the broken literal, and not the reworded dash.
+  // check still reports the broken literal, and not the reworded dash — nor the valid
+  // ICU message, whose "=0 {Nobody}" option text isn't a placeholder (#69).
   const checked = await check({ cwd: dir, from: "en" });
   assert.deepEqual(
     checked.issues.filter((i) => i.kind === "placeholder-mismatch").map((i) => (i as { path: string }).path).toSorted(),
-    ["contact", "edited", "offset"],
+    ["contact", "edited"],
   );
 });
 
@@ -3225,4 +3226,97 @@ test("engine: a tag holding only a placeholder, e-mail or URL is never re-transl
   assert.equal(translations.get(sources[1]), "Écrivez à <a href=\"mailto:help@example.com\">help@example.com</a> à tout moment.");
   assert.equal(translations.get(sources[2]), "Docs : <a href=\"https://example.com/docs\">https://example.com/docs</a> d'abord.");
   assert.deepEqual(issues, [], "nothing to report: these were translated correctly");
+});
+
+test("check: ICU option text that looks like an argument (=0 {Nobody}) isn't a placeholder; a dropped real one still fails (#69)", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-icu-offset-"));
+  fs.mkdirSync(path.join(dir, "locales"));
+  const offset = "{n, plural, offset:1 =0 {Nobody} =1 {Only {host}} other {{host} and # others}}";
+  fs.writeFileSync(path.join(dir, "locales/en.json"), JSON.stringify({ ok: offset, broken: offset }));
+  fs.writeFileSync(
+    path.join(dir, "locales/fr.json"),
+    JSON.stringify({
+      ok: "{n, plural, offset:1 =0 {Personne} =1 {Seulement {host}} other {{host} et # autres}}",
+      broken: "{n, plural, offset:1 =0 {Personne} =1 {Seulement {host}} other {et # autres}}",
+    }),
+  );
+  const checked = await check({ cwd: dir, from: "en" });
+  const mismatches = checked.issues.filter((i) => i.kind === "placeholder-mismatch") as Array<{ path: string; sourcePlaceholders: string[] }>;
+  assert.deepEqual(mismatches.map((i) => i.path), ["broken"]);
+  assert.ok(!mismatches[0]!.sourcePlaceholders.includes("{Nobody}"), "option text isn't listed as a placeholder");
+});
+
+test("detectLayout: an XLIFF whose source-language is a regional variant of --from is accepted (#70)", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-xlf-region-"));
+  const file = path.join(dir, "messages.xlf");
+  fs.writeFileSync(file, `<?xml version="1.0"?><xliff version="1.2"><file source-language="en-US" datatype="plaintext"><body></body></file></xliff>`);
+  assert.equal(detectLayout(dir, "en", file).kind, "xliff", "Angular's en-US with the default --from en");
+  assert.equal(detectLayout(dir, "en-US", file).kind, "xliff");
+  assert.throws(() => detectLayout(dir, "de", file), /has source-language "en-US", not "de"/);
+});
+
+test("translate: a tool-written string the current config would translate differently is repaired, a hand edit isn't (#72)", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-config-repair-"));
+  fs.mkdirSync(path.join(dir, "locales"));
+  const en = { brand: "Northwind", tagline: "Northwind keeps your team in sync.", signup: "Create your free account", edited: "Northwind for teams", fine: "See all features" };
+  const de = { brand: "Nordwind", tagline: "Nordwind hält Ihr Team synchron.", signup: "Erstellen Sie Ihr kostenloses Konto", edited: "Nordwind für Teams", fine: "Alle Funktionen anzeigen" };
+  fs.writeFileSync(path.join(dir, "locales/en.json"), JSON.stringify(en));
+  fs.writeFileSync(path.join(dir, "locales/de.json"), JSON.stringify(de));
+  const entries: Record<string, Record<string, string>> = {};
+  for (const k of Object.keys(en) as Array<keyof typeof en>) {
+    entries[`locales/en.json#${k}`] = { de: `${hashOf(en[k])}:${hashOf(k === "edited" ? "what the tool wrote" : de[k])}` };
+  }
+  fs.writeFileSync(path.join(dir, "locale-ai.lock.json"), JSON.stringify({ version: 3, entries }));
+  // Added after the first run: the brand must stay, and one label gets a glossary entry.
+  fs.writeFileSync(
+    path.join(dir, "locale-ai.config.json"),
+    JSON.stringify({ doNotTranslate: ["Northwind"], glossary: { de: { "Create your free account": "Kostenloses Konto erstellen" } } }),
+  );
+  const result = await translate({ cwd: dir, from: "en", to: "de", dryRun: true });
+  // brand + tagline (lost the term) and signup (glossary) — not the hand-edited one, not the fine one.
+  assert.equal(result.dryRun![0]!.pending, 3);
+});
+
+test("built-in glossary covers common e-commerce labels (#76)", async () => {
+  const { glossaryLookup } = await import("../src/glossary.ts");
+  const en = parseLocale("en");
+  assert.equal(glossaryLookup(en, parseLocale("fr"), {})("Add to cart"), "Ajouter au panier");
+  assert.equal(glossaryLookup(en, parseLocale("de"), {})("Shop"), "Shop");
+  assert.equal(glossaryLookup(en, parseLocale("es"), {})("Cart"), "Carrito");
+});
+
+test("engine: an emptied Angular START/CLOSE placeholder pair is reported, and its text-left-English is fixed (#73)", async () => {
+  const start = (n: string) => `<x id="START_${n}" ctype="x-a" equiv-text="&lt;a&gt;"/>`;
+  const close = `<x id="CLOSE_LINK" ctype="x-a" equiv-text="&lt;/a&gt;"/>`;
+  const emptied = `By booking you agree to our ${start("LINK")}privacy policy${close}.`;
+  const english = `Read the ${start("LINK_1")}terms${close} first.`;
+  const es: Record<string, string> = {
+    "By booking you agree to our <0/>privacy policy<1/>.": "Al reservar acepta nuestras políticas de privacidad <0/> <1/>.",
+    "Read the <0/>terms<1/> first.": "Lea primero los <0/>terms<1/>.",
+    terms: "términos",
+  };
+  const { translations, issues } = await translateStrings([emptied, english], [fakeTranslator((s) => es[s] ?? s)], { sourceLang: "en", targetLang: "es", batchSize: 8 });
+  assert.deepEqual(issues.map((i) => `${i.kind}: ${i.source.slice(0, 15)}`), ["empty-tag: By booking you "]);
+  assert.equal(translations.get(english), `Lea primero los ${start("LINK_1")}términos${close}.`);
+});
+
+test("engine: a tag text left partly in English is reported, never rewritten; a cognate isn't (#74)", async () => {
+  const fr: Record<string, string> = {
+    "Still stuck? <0>Chat with us</0> today.": "Toujours bloqué ? <0>Chat avec us</0> aujourd'hui.",
+    "Read our <0>return policy</0> now.": "Lisez notre politique <0>return</0> maintenant.",
+    "Check the <0>total</0> below.": "Vérifiez le <0>total général</0> ci-dessous.",
+  };
+  const sources = ["Still stuck? <strong>Chat with us</strong> today.", "Read our <link>return policy</link> now.", "Check the <b>total</b> below."];
+  const { translations, issues } = await translateStrings(sources, [fakeTranslator((s) => fr[s] ?? s)], { sourceLang: "en", targetLang: "fr", batchSize: 8 });
+  assert.deepEqual(issues.map((i) => `${i.kind}: ${i.source}`).toSorted(), [`untranslated-tag: ${sources[1]}`, `untranslated-tag: ${sources[0]}`].toSorted());
+  assert.equal(translations.get(sources[0]), "Toujours bloqué ? <strong>Chat avec us</strong> aujourd'hui.", "reported, not rewritten");
+});
+
+test("translate: gettext entries that differ only by msgctxt but come back identical are reported (#75)", async () => {
+  const { readLocaleDoc } = await import("../src/locales.ts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-msgctxt-"));
+  const po = `msgid ""\nmsgstr ""\n"Content-Type: text/plain; charset=UTF-8\\n"\n\nmsgctxt "verb"\nmsgid "Order"\nmsgstr ""\n\nmsgctxt "noun"\nmsgid "Order"\nmsgstr ""\n`;
+  fs.writeFileSync(path.join(dir, "en.po"), po);
+  const keys = Object.keys(readLocaleDoc(path.join(dir, "en.po"), "en", true).data as object);
+  assert.ok(keys.every((k) => k.endsWith("\u0004Order")), "both entries are keyed by context + msgid");
 });

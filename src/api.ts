@@ -75,33 +75,41 @@ function openLock(config: ProjectConfig, layout: Layout, persist: boolean): { lo
  * The placeholders `check` compares (see `check`), as one sortable key: curly quotes
  * stripped, and dashes left out unless `withDashes` — a dash is typography a translator
  * may reword, but a string this tool wrote should still have its source's.
+ *
+ * A complex ICU message is compared run by run (the texts its extractor hands the
+ * model), not as one raw string: there, an option body that merely looks like a simple
+ * argument (`=0 {Nobody}` → `{Nobody}`) is translatable text, and comparing it as a
+ * placeholder failed every valid translation of it.
  */
+const placeholderTokens = (s: string) => (extractIcu(s)?.units ?? [s]).flatMap((r) => mask(r, "natural").tokens);
+
 function placeholderKey(s: string, withDashes: boolean): string {
-  return mask(s, "natural")
-    .tokens.filter((t) => withDashes || !isDash(t))
+  return placeholderTokens(s)
+    .filter((t) => withDashes || !isDash(t))
     .map(stripCurlyQuotePair)
     .toSorted()
     .join("\u0001");
 }
 
-function staleNotEdited(lock: LockFile, lockKey: string, existing: unknown, targetTag: string): (p: string, s: string) => boolean {
+function staleNotEdited(
+  lock: LockFile,
+  lockKey: string,
+  existing: unknown,
+  targetTag: string,
+  outdated?: (source: string, current: string) => boolean,
+): (p: string, s: string) => boolean {
   const existingFlat = new Map(flattenStrings(existing).map((e) => [e.path, e.value]));
   return (p, s) => {
     const current = existingFlat.get(p);
-    // Exactly what this tool wrote, but its placeholders no longer match the source's:
-    // an older version broke it (a vue-i18n {'@'} it didn't protect yet, a dash the
-    // en-it model replaced with "[49]"). Repaired here instead of only by --overwrite,
-    // which would discard every hand edit too. A hand-edited string is never touched,
-    // and a complex ICU message is left to its own structure check — check's simple-
-    // placeholder pattern can misread its branch text ("=0 {Nobody}"), which would
-    // re-translate it on every run.
+    // Exactly what this tool wrote, but no longer what it would write: its placeholders
+    // don't match the source's (an older version broke it — a vue-i18n {'@'} it didn't
+    // protect yet, a dash the en-it model replaced with "[49]"), or the project config
+    // changed since (`outdated`). Repaired here instead of only by --overwrite, which
+    // would discard every hand edit too. A hand-edited string is never touched, and a
+    // complex ICU message's placeholders are left to its own structure check.
     if (!isSourceStale(lock, lockKey, p, targetTag, s)) {
-      return (
-        current !== undefined &&
-        !isIcuComplex(s) &&
-        isToolWritten(lock, lockKey, p, targetTag, current) &&
-        placeholderKey(current, true) !== placeholderKey(s, true)
-      );
+      if (current === undefined || !isToolWritten(lock, lockKey, p, targetTag, current)) return false;
+      return (!isIcuComplex(s) && placeholderKey(current, true) !== placeholderKey(s, true)) || (outdated?.(s, current) ?? false);
     }
     return current === undefined || !isEdited(lock, lockKey, p, targetTag, current);
   };
@@ -282,6 +290,19 @@ export async function translate(opts: TranslateOptions): Promise<TranslateResult
   const catalog = fullCatalog(config, cwd);
   const protect = protectRegex(config);
   const isProtectedKey = keyPathProtect(config.doNotTranslateKeys);
+  // A tool-written string the current config would now translate differently: a
+  // glossary entry (the project's or the built-in one) that covers the whole string,
+  // or a doNotTranslate term its translation lost. Adding either after the first run
+  // used to change nothing — "0 strings translated" — until a full --overwrite.
+  const outdatedFor = (locale: Locale) => {
+    const lookup = glossaryLookup(from, locale, config);
+    const terms = protect ? new RegExp(protect.source, "gu") : undefined;
+    return (source: string, current: string): boolean => {
+      const hit = lookup(source);
+      if (hit !== undefined) return hit !== current;
+      return terms !== undefined && [...source.matchAll(terms)].some((m) => !current.includes(m[0]));
+    };
+  };
   const layout = detectLayout(cwd, from.tag, opts.input);
   const { lockDir, lockPath, lock, movedFrom } = openLock(config, layout, !opts.dryRun);
   const lockExisted = fs.existsSync(lockPath);
@@ -303,7 +324,7 @@ export async function translate(opts: TranslateOptions): Promise<TranslateResult
     const files = sources.map(({ file, doc }): FileJob => {
       const target = targetFile(layout, from.tag, locale.tag, file);
       const existing = fs.existsSync(target) ? readLocaleDoc(target, locale.tag).data : undefined;
-      const isStale = staleNotEdited(lock, fileKey(file, lockDir), existing, locale.tag);
+      const isStale = staleNotEdited(lock, fileKey(file, lockDir), existing, locale.tag, outdatedFor(locale));
       const entries = pendingEntries(doc.data, existing, opts.overwrite ?? false, isProtectedKey, isStale);
       return {
         source: file,
@@ -390,7 +411,7 @@ export async function translate(opts: TranslateOptions): Promise<TranslateResult
       const lockKey = fileKey(f.source, lockDir);
       const srcFlat = flattenStrings(f.doc.data);
       const srcPaths = new Set(srcFlat.map((e) => e.path));
-      const isStale = staleNotEdited(lock, lockKey, f.existing, job.locale.tag);
+      const isStale = staleNotEdited(lock, lockKey, f.existing, job.locale.tag, outdatedFor(job.locale));
       if (f.existing !== undefined) {
         const srcByPath = new Map(srcFlat.map((e) => [e.path, e.value]));
         for (const editedPath of editedPaths(lock, lockKey, job.locale.tag, flattenStrings(f.existing))) {
@@ -439,6 +460,19 @@ export async function translate(opts: TranslateOptions): Promise<TranslateResult
         written++;
       }
       const outFlat = new Map(flattenStrings(plural.doc).map((e) => [e.path, e.value]));
+      // gettext entries that differ only by msgctxt exist precisely to get different
+      // translations ("Order" the verb vs the noun), but the model only ever sees the
+      // msgid, so they come back identical. Reported once, when translated this run.
+      const byMsgid = new Map<string, string[]>();
+      for (const { path: p } of srcFlat) {
+        const sep = p.indexOf("\u0004");
+        if (sep < 0 || !translatedSet.has(p)) continue;
+        const msgid = p.slice(sep + 1).replace(/\\(.)/g, "$1");
+        byMsgid.set(msgid, [...(byMsgid.get(msgid) ?? []), outFlat.get(p) ?? ""]);
+      }
+      for (const [msgid, outs] of byMsgid) {
+        if (outs.length > 1 && outs.every((o) => o === outs[0])) allIssues.push({ source: msgid, kind: "context-ignored", output: outs[0], locale: job.locale.tag });
+      }
       recordEntries(
         pending,
         lockKey,
@@ -572,8 +606,8 @@ export async function check(opts: CheckOptions = {}): Promise<CheckResult> {
           continue;
         }
         const srcMasked = mask(srcVal, "natural");
-        const srcTokens = srcMasked.tokens.toSorted();
-        const tgtTokens = mask(tgtVal, "natural").tokens.toSorted();
+        const srcTokens = placeholderTokens(srcVal).toSorted();
+        const tgtTokens = placeholderTokens(tgtVal).toSorted();
         // Compare with quotes stripped: a translation is free to wrap a placeholder in
         // its own language's quoting convention, use none, or rephrase a possessive
         // away — none of that is a real placeholder mismatch (see stripCurlyQuotePair).

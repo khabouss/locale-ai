@@ -179,7 +179,11 @@ export function detectLayout(cwd: string, from: string, input?: string): Layout 
       const fileTag = /<file\b[^>]*>/.exec(t);
       if (!fileTag) throw new Error(`Invalid XLIFF in ${input}: no <file> element found.`);
       const sourceLanguage = /\bsource-language="([^"]*)"/.exec(fileTag[0])?.[1];
-      if (sourceLanguage !== undefined && sourceLanguage !== from) {
+      // A regional variant of the same language is the same source: Angular's
+      // extract-i18n writes "en-US", and the default --from is "en". (Not relaxed for
+      // .xcstrings above, whose reader looks up `localizations[<from>]` by exact tag.)
+      const primary = (t: string) => t.toLowerCase().split(/[-_]/)[0];
+      if (sourceLanguage !== undefined && primary(sourceLanguage) !== primary(from)) {
         throw new Error(`${input} has source-language "${sourceLanguage}", not "${from}" — pass --from ${sourceLanguage}.`);
       }
       return { kind: "xliff", root: path.dirname(abs), file: abs, ext: abs.endsWith(".xliff") ? ".xliff" : ".xlf" };

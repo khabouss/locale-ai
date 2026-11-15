@@ -363,7 +363,9 @@ async function cmdModels(argv: string[]): Promise<number> {
     case "convert":
       return convertModel(positionals[0], values);
     default:
-      log(HELP);
+      // Just the models commands, not the whole CLI help.
+      if (sub) log(`Unknown models command "${sub}".\n`);
+      log(`Usage:\n${HELP.split("\n").filter((l) => l.includes("locale-ai models")).join("\n")}`);
       return sub ? 1 : 0;
   }
 }
