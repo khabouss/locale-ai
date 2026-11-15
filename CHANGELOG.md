@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.30
 
 - **Regression in 0.7.29: the untranslated-tag pass corrupted placeholders, e-mails and URLs inside tags** ([khabouss/locale-ai#65](https://github.com/khabouss/locale-ai/issues/65)) — a tag text the model correctly kept unchanged, like `<em>%(title)s</em>` or `<a href="mailto:…">help@example.com</a>`, was taken for untranslated English and re-translated alone without placeholder masking: `%(titre)s`, `%(título)s`, `help@ejemplo.com`, `https://ejemplo.com/docs`. A renamed Python format key fails Django's `compilemessages` and raises `KeyError` at runtime. Only a tag text that's plain words is re-translated now; anything the masker protects is left alone (0/32 damaged strings across 8 placeholder styles and 4 languages, down from 7/32).
 - **An escaped `%%` in a python-format/c-format `.po` message came back as a single `%`** ([khabouss/locale-ai#66](https://github.com/khabouss/locale-ai/issues/66)) — Django's `makemessages` writes "10%% off"; the translation's lone "%" reads as a broken format directive, so `msgfmt -c` and `compilemessages` rejected the whole catalog. `%%` is now protected like `%s`.
