@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.26
+
+- **Upgrading from 0.7.23 still lost change tracking for a flat dotted key, after one run with nothing to translate** ([khabouss/locale-ai#51](https://github.com/khabouss/locale-ai/issues/51)) — 0.7.25's fallback to the old, unescaped lock path (`"menu.save"`) only migrated the entry in the lock loaded at the start of a run, but the save step re-reads the lock from disk and prunes paths that no longer exist, so the old entry was deleted with nothing written under the new escaped path (`"menu\.save"`). A later source edit on that key was then silently ignored, and `check` reported it clean. Pruning now renames such a legacy entry onto its escaped path instead of deleting it (an entry already recorded under the escaped path wins per locale; an ambiguous legacy path is still pruned), so the migration sticks on any run, including a no-op one.
+
 ## 0.7.25
 
 Four fixes for regressions that 0.7.24's own dotted-key-escaping and orphan-key-pruning fixes introduced, found by re-testing the published 0.7.24 against the round-8 fixtures plus new tests aimed at the changed code ([khabouss/locale-ai#49](https://github.com/khabouss/locale-ai/issues/49)):
