@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.28
 
 - **vue-i18n literal interpolation (`{'@'}`, `{'|'}`, `@:{'key'}`) was translated instead of protected** ([khabouss/locale-ai#55](https://github.com/khabouss/locale-ai/issues/55)) — the model rewrote it: `hello{'@'}harbor.cafe` came back as `hello.cafe.fr` (a different address) or `hello & quot؛ & quot؛ & quot؛ harbor.cafe`, and `@:{'brand'}` as `‘brand’`, while `check` passed. A `{'…'}` literal, the braced linked form `@:{'key'}`, and an e-mail address written with `{'@'}` (as one unit) are now masked like any other placeholder, so `check` also reports one that goes missing.
 - **En/em dashes were lost or replaced with garbage by the en→it model** ([khabouss/locale-ai#56](https://github.com/khabouss/locale-ai/issues/56)) — `{open} – {close}` came back as `{open} [49] {close}` or `{open} € {close}`. `–` and `—` are now protected like `©`/`®`/`™`. `check` doesn't compare them, since a translator writing "de {open} à {close}" or a plain hyphen is legitimate.
