@@ -387,6 +387,46 @@ test("lock: a pre-0.7.24 entry for a flat dotted key is found by its new, escape
   assert.deepEqual(lock.entries["en.json#menu\\.save"], { fr: `${hashOf("Save profile")}:${hashOf("Enregistrer le profil")}` });
 });
 
+test("lock: pruning renames a pre-0.7.24 dotted-key entry onto its escaped path instead of deleting it (regression)", () => {
+  // mergeAndSaveLock prunes a copy re-read from disk, which never saw lookupPair's
+  // in-memory migration — so a run with nothing to translate used to delete the legacy
+  // entry outright, and a later source edit on that key was silently ignored forever.
+  const pair = (s: string, w: string) => `${hashOf(s)}:${hashOf(w)}`;
+  const lock = {
+    version: 3 as const,
+    entries: {
+      "en.json#menu.save": { fr: pair("Save", "Enregistrer"), de: pair("Save", "Speichern") },
+      "en.json#gone": { fr: pair("Old", "Ancien") },
+      "other.json#menu.save": { fr: pair("Save", "Enregistrer") },
+    } as Record<string, Record<string, string>>,
+  };
+  pruneDeletedKeys(lock, "en.json", ["menu\\.save", "title"]);
+  assert.deepEqual(Object.keys(lock.entries).sort(), ["en.json#menu\\.save", "other.json#menu.save"]);
+  assert.deepEqual(lock.entries["en.json#menu\\.save"], { fr: pair("Save", "Enregistrer"), de: pair("Save", "Speichern") });
+  assert.equal(isSourceStale(lock, "en.json", "menu\\.save", "fr", "Save changes"), true, "a later source edit is still detected");
+
+  // An entry already recorded under the escaped path is newer, so it wins per locale.
+  const mixed = {
+    version: 3 as const,
+    entries: {
+      "en.json#menu.save": { fr: pair("Save", "Enregistrer"), de: pair("Save", "Speichern") },
+      "en.json#menu\\.save": { fr: pair("Save changes", "Enregistrer les modifications") },
+    } as Record<string, Record<string, string>>,
+  };
+  pruneDeletedKeys(mixed, "en.json", ["menu\\.save"]);
+  assert.deepEqual(mixed.entries, { "en.json#menu\\.save": { fr: pair("Save changes", "Enregistrer les modifications"), de: pair("Save", "Speichern") } });
+
+  // A legacy path that's still a real current path (the nested menu -> save) keeps its own entry.
+  const nested = { version: 3 as const, entries: { "en.json#menu.save": { fr: pair("Save", "Enregistrer") } } as Record<string, Record<string, string>> };
+  pruneDeletedKeys(nested, "en.json", ["menu.save", "menu\\.save"]);
+  assert.deepEqual(nested.entries, { "en.json#menu.save": { fr: pair("Save", "Enregistrer") } });
+
+  // Two escaped paths that both unescape to the same legacy path: ambiguous, pruned rather than guessed.
+  const ambiguous = { version: 3 as const, entries: { "en.json#a.b.c": { fr: pair("X", "Y") } } as Record<string, Record<string, string>> };
+  pruneDeletedKeys(ambiguous, "en.json", ["a\\.b.c", "a.b\\.c"]);
+  assert.deepEqual(ambiguous.entries, {});
+});
+
 test("lockedPathsFor: every leaf path this tool previously translated, for one file and locale", () => {
   const lock = loadLock(path.join(fs.mkdtempSync(path.join(os.tmpdir(), "lai-lockedpaths-")), "locale-ai.lock.json"));
   recordEntries(lock, "en.json", "fr", [

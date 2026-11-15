@@ -232,13 +232,34 @@ export function lockedPathsFor(lock: LockFile, fileKey: string, targetTag: strin
   return out;
 }
 
-/** Removes lock entries (for every locale) whose key path no longer exists in the current source — so a deleted key doesn't linger forever. */
+/**
+ * Removes lock entries (for every locale) whose key path no longer exists in the current source — so a deleted key doesn't linger forever.
+ *
+ * A pre-0.7.24 entry for a flat key with a literal `.` in its name (`"menu.save"`, now
+ * the escaped `"menu\.save"`) matches no current path either, but it isn't deleted: it's
+ * renamed onto the escaped path instead. `lookupPair`'s fallback only migrates it in the
+ * lock loaded at the start of a run, and `mergeAndSaveLock` prunes a copy re-read fresh
+ * from disk — so without this, a run that never looked the key up (nothing to translate)
+ * deleted the old entry with nothing written in its place, losing that key's change
+ * tracking for good. An entry already recorded under the escaped path wins per locale,
+ * and a legacy path that's ambiguous (two current escaped paths unescape to it) is
+ * pruned as before rather than guessed at.
+ */
 export function pruneDeletedKeys(lock: LockFile, fileKey: string, currentPaths: Iterable<string>): void {
   const keep = new Set(currentPaths);
+  const byLegacy = new Map<string, string | null>();
+  for (const p of keep) {
+    const legacy = legacyPathFor(p);
+    if (legacy !== p) byLegacy.set(legacy, byLegacy.has(legacy) ? null : p);
+  }
   const prefix = entryKey(fileKey, "");
   for (const key of Object.keys(lock.entries)) {
     if (!key.startsWith(prefix)) continue;
-    if (!keep.has(key.slice(prefix.length))) delete lock.entries[key];
+    const p = key.slice(prefix.length);
+    if (keep.has(p)) continue;
+    const escaped = byLegacy.get(p);
+    if (escaped) lock.entries[entryKey(fileKey, escaped)] = { ...lock.entries[key], ...lock.entries[entryKey(fileKey, escaped)] };
+    delete lock.entries[key];
   }
 }
 
