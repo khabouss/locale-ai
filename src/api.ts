@@ -15,7 +15,7 @@ import { writeFileAtomic } from "./fs-atomic.ts";
 import { glossaryLookup, loadConfig, protectRegex, type ProjectConfig } from "./glossary.ts";
 import { extractIcu, isIcuComplex } from "./icu.ts";
 import { intlCode, parseLocale, type Locale } from "./lang.ts";
-import { editedPaths, isEdited, isSourceStale, LOCK_FILENAME, loadLock, lockedPathsFor, mergeAndSaveLock, rebaseLock, recordEntries, saveLock, type LockFile } from "./lock.ts";
+import { editedPaths, isEdited, isSourceStale, isToolWritten, LOCK_FILENAME, loadLock, lockedPathsFor, mergeAndSaveLock, rebaseLock, recordEntries, saveLock, type LockFile } from "./lock.ts";
 import {
   addNestedPluralForms,
   addPluralForms,
@@ -71,11 +71,38 @@ function openLock(config: ProjectConfig, layout: Layout, persist: boolean): { lo
   return { lockDir, lockPath, lock, movedFrom: oldPath };
 }
 
+/**
+ * The placeholders `check` compares (see `check`), as one sortable key: curly quotes
+ * stripped, and dashes left out unless `withDashes` — a dash is typography a translator
+ * may reword, but a string this tool wrote should still have its source's.
+ */
+function placeholderKey(s: string, withDashes: boolean): string {
+  return mask(s, "natural")
+    .tokens.filter((t) => withDashes || !isDash(t))
+    .map(stripCurlyQuotePair)
+    .toSorted()
+    .join("\u0001");
+}
+
 function staleNotEdited(lock: LockFile, lockKey: string, existing: unknown, targetTag: string): (p: string, s: string) => boolean {
   const existingFlat = new Map(flattenStrings(existing).map((e) => [e.path, e.value]));
   return (p, s) => {
-    if (!isSourceStale(lock, lockKey, p, targetTag, s)) return false;
     const current = existingFlat.get(p);
+    // Exactly what this tool wrote, but its placeholders no longer match the source's:
+    // an older version broke it (a vue-i18n {'@'} it didn't protect yet, a dash the
+    // en-it model replaced with "[49]"). Repaired here instead of only by --overwrite,
+    // which would discard every hand edit too. A hand-edited string is never touched,
+    // and a complex ICU message is left to its own structure check — check's simple-
+    // placeholder pattern can misread its branch text ("=0 {Nobody}"), which would
+    // re-translate it on every run.
+    if (!isSourceStale(lock, lockKey, p, targetTag, s)) {
+      return (
+        current !== undefined &&
+        !isIcuComplex(s) &&
+        isToolWritten(lock, lockKey, p, targetTag, current) &&
+        placeholderKey(current, true) !== placeholderKey(s, true)
+      );
+    }
     return current === undefined || !isEdited(lock, lockKey, p, targetTag, current);
   };
 }
@@ -545,18 +572,15 @@ export async function check(opts: CheckOptions = {}): Promise<CheckResult> {
           continue;
         }
         const srcMasked = mask(srcVal, "natural");
-        const tgtMasked = mask(tgtVal, "natural");
         const srcTokens = srcMasked.tokens.toSorted();
-        const tgtTokens = tgtMasked.tokens.toSorted();
+        const tgtTokens = mask(tgtVal, "natural").tokens.toSorted();
         // Compare with quotes stripped: a translation is free to wrap a placeholder in
         // its own language's quoting convention, use none, or rephrase a possessive
         // away — none of that is a real placeholder mismatch (see stripCurlyQuotePair).
         // Strip before sorting: sorting the raw (quote-including) tokens first could
         // order a quoted source token differently from its unquoted target counterpart.
         // Dashes are protected during translation but are typography, not syntax (see isDash).
-        const srcKey = srcMasked.tokens.filter((t) => !isDash(t)).map(stripCurlyQuotePair).toSorted().join("\u0001");
-        const tgtKey = tgtMasked.tokens.filter((t) => !isDash(t)).map(stripCurlyQuotePair).toSorted().join("\u0001");
-        if (srcKey !== tgtKey) {
+        if (placeholderKey(srcVal, false) !== placeholderKey(tgtVal, false)) {
           mismatched++;
           issues.push({ locale: to, kind: "placeholder-mismatch", target, path: p, sourcePlaceholders: srcTokens, targetPlaceholders: tgtTokens });
           continue;

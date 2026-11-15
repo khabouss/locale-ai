@@ -202,6 +202,12 @@ export function isEdited(lock: LockFile, fileKey: string, path: string, targetTa
   return pair !== undefined && pair.written !== hashOf(currentValue);
 }
 
+/** True when the text on disk at `path` for `targetTag` is exactly what this tool last wrote there (tracked, and not edited since). */
+export function isToolWritten(lock: LockFile, fileKey: string, path: string, targetTag: string, currentValue: string): boolean {
+  const pair = lookupPair(lock, fileKey, path, targetTag);
+  return pair !== undefined && pair.written === hashOf(currentValue);
+}
+
 /** Key paths whose existing target text for `targetTag` was edited since this tool last wrote it (see `isEdited`). */
 export function editedPaths(
   lock: LockFile,

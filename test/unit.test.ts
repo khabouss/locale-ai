@@ -3108,3 +3108,76 @@ test("SentencePiece encoder matches the reference segmentation (if a model is ca
   assert.deepEqual(sp.encode("  Hello   world\t\tagain  "), sp.encode("Hello world again"));
   assert.deepEqual(sp.encode(""), []);
 });
+
+test("mask: a void-element tag name that's closed in the same string is an open/close pair (next-intl <link>…</link>)", () => {
+  // Masked as a self-closing <0/> plus a stray </1>, no model could follow it, and the
+  // string fell through to the last-resort strategy with its link text left in English.
+  assert.equal(mask("Read our <link>return policy</link> for details.").text, "Read our <0>return policy</0> for details.");
+  assert.equal(mask("Line<br>break and <img src=x>").text, "Line<0/>break and <1/>", "a real void element stays self-closing");
+});
+
+test("engine: text left untranslated inside a tag is translated on its own; a name is kept and not reported", async () => {
+  // A model that translates the sentence around a tag but copies the tag's text over.
+  const fr: Record<string, string> = {
+    "Read our <0>return policy</0> for details.": "Lisez notre <0>return policy</0> pour plus de détails.",
+    "return policy": "Politique de retour",
+    "Powered by <0>Trailhead</0> since 2015.": "Propulsé par <0>Trailhead</0> depuis 2015.",
+    "Click <0>here</0> now.": "Cliquez <0>here</0> maintenant.",
+    here: "here",
+  };
+  const tr = fakeTranslator((s) => fr[s] ?? s);
+  const { translations, issues } = await translateStrings(
+    ["Read our <link>return policy</link> for details.", "Powered by <b>Trailhead</b> since 2015.", "Click <a href=\"/x\">here</a> now."],
+    [tr],
+    { sourceLang: "en", targetLang: "fr", batchSize: 8 },
+  );
+  assert.equal(translations.get("Read our <link>return policy</link> for details."), "Lisez notre <link>politique de retour</link> pour plus de détails.", "lowercase mid-sentence, like its source");
+  assert.equal(translations.get("Powered by <b>Trailhead</b> since 2015."), "Propulsé par <b>Trailhead</b> depuis 2015.");
+  assert.equal(translations.get("Click <a href=\"/x\">here</a> now."), "Cliquez <a href=\"/x\">here</a> maintenant.");
+  assert.deepEqual(
+    issues.map((i) => `${i.kind}: ${i.source}`),
+    ["untranslated-tag: Click <a href=\"/x\">here</a> now."],
+    "only a text that's still English is reported — not the name",
+  );
+});
+
+test("translate: a tool-written string whose placeholders no longer match the source is repaired without --overwrite (regression)", async () => {
+  // 0.7.27 broke vue-i18n {'@'} literals and en-it dashes; 0.7.28's check reports them,
+  // but translate said "0 strings translated" because the source didn't change.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-repair-"));
+  fs.mkdirSync(path.join(dir, "locales"));
+  const en = {
+    contact: "Email hello{'@'}harbor.cafe or call {0}.",
+    hours: "Monday to Friday: {open} – {close}",
+    edited: "Email hello{'@'}harbor.cafe today.",
+    offset: "{n, plural, offset:1 =0 {Nobody} other {{host} and # others}}",
+    fine: "Welcome, {name}!",
+  };
+  const fr = {
+    contact: "Écrivez à hello.cafe.fr ou appelez le {0}.",
+    hours: "Dal lunedì al venerdì: {open} [49] {close}",
+    edited: "Écrivez-nous aujourd'hui.",
+    offset: "{n, plural, offset:1 =0 {Personne} other {{host} et # autres}}",
+    fine: "Bienvenue, {name} !",
+  };
+  fs.writeFileSync(path.join(dir, "locales/en.json"), JSON.stringify(en));
+  fs.writeFileSync(path.join(dir, "locales/fr.json"), JSON.stringify(fr));
+  const entries: Record<string, Record<string, string>> = {};
+  for (const k of Object.keys(en) as Array<keyof typeof en>) {
+    // "edited" was hand-edited since: its written hash is of something else.
+    entries[`en.json#${k}`] = { fr: `${hashOf(en[k])}:${hashOf(k === "edited" ? "what the tool wrote" : fr[k])}` };
+  }
+  fs.writeFileSync(path.join(dir, "locales/locale-ai.lock.json"), JSON.stringify({ version: 3, entries }));
+
+  const result = await translate({ cwd: dir, from: "en", to: "fr", dryRun: true });
+  // contact (lost {'@'} literal) and hours (lost dash) only: never the hand-edited one,
+  // never a complex ICU message, never one that's fine.
+  assert.equal(result.dryRun![0]!.pending, 2);
+
+  // check still reports the broken literal, and not the reworded dash.
+  const checked = await check({ cwd: dir, from: "en" });
+  assert.deepEqual(
+    checked.issues.filter((i) => i.kind === "placeholder-mismatch").map((i) => (i as { path: string }).path).toSorted(),
+    ["contact", "edited", "offset"],
+  );
+});

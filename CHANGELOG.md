@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **Text inside an inline tag was often left in English, and nothing reported it** ([khabouss/locale-ai#59](https://github.com/khabouss/locale-ai/issues/59)) — "Immer noch stecken? <strong>Chat with us</strong>", "Lisez notre <link>return policy</link>". A tag text the model copies over unchanged while translating the rest of the string is now translated on its own and put back inside its tag (in its source's case: "<link>politique de retour</link>"). A capitalized name ("<b>Trailhead</b>") is kept as it is; anything else still in English is reported as `untranslated-tag`.
+- **next-intl's `<link>…</link>` (and any other void-element name used as a rich-text tag) was masked as a broken pair** — `link` is an HTML void element, so `<link>` was read as self-closing and `</link>` as a stray closer, which no model could follow; the string fell through to the last-resort strategy with its link text left in English. A void name that's closed in the same string is now an ordinary open/close pair.
+- **`translate` didn't repair strings whose placeholders fail `check` unless `--overwrite`** ([khabouss/locale-ai#60](https://github.com/khabouss/locale-ai/issues/60)) — after upgrading, `check` reported the `{'@'}` literals and en→it dashes an older version broke, but `translate` said "0 strings translated" because the source hadn't changed, and `--overwrite` discards every hand edit. A string that's exactly what this tool last wrote (per the lock) but whose placeholders no longer match its source — including a lost dash — is now re-translated on a normal run. A hand-edited string is never touched, and a complex ICU message is left to its own structure check.
+
 ## 0.7.28
 
 - **vue-i18n literal interpolation (`{'@'}`, `{'|'}`, `@:{'key'}`) was translated instead of protected** ([khabouss/locale-ai#55](https://github.com/khabouss/locale-ai/issues/55)) — the model rewrote it: `hello{'@'}harbor.cafe` came back as `hello.cafe.fr` (a different address) or `hello & quot؛ & quot؛ & quot؛ harbor.cafe`, and `@:{'brand'}` as `‘brand’`, while `check` passed. A `{'…'}` literal, the braced linked form `@:{'key'}`, and an e-mail address written with `{'@'}` (as one unit) are now masked like any other placeholder, so `check` also reports one that goes missing.
