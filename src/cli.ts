@@ -212,6 +212,9 @@ async function cmdTranslate(argv: string[]): Promise<number> {
                   (e.layout.kind === "dir" ? `${e.fromTag}${e.layout.dirSuffix ?? ""}/` : ""),
           );
           break;
+        case "lock-moved":
+          log(`Moved ${rel(e.from)} to ${rel(e.to)}, next to your config file — commit both changes.`);
+          break;
         case "route-missing":
           log(`✗ ${e.locale}: no local model for ${e.sourceLang} → ${e.targetLang}.`);
           log(`  Available from ${e.sourceLang}: ${e.available.join(", ") || "(none)"}`);
@@ -439,6 +442,7 @@ async function cmdAccept(argv: string[]): Promise<number> {
     config: values.config,
     keys: positionals,
   });
+  if (result.lockMovedFrom) log(`Moved ${rel(result.lockMovedFrom)} to ${rel(result.lockFile)}, next to your config file — commit both changes.`);
   if (!result.locales.length) {
     log(`No translated locales found next to ${parseLocale(values.from!).tag}.`);
     return 0;
