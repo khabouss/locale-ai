@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- **`check`: an ICU option body that looks like an argument (`offset:1 =0 {Nobody}`) was compared as a placeholder** ([khabouss/locale-ai#69](https://github.com/khabouss/locale-ai/issues/69)) — every valid translation of it failed CI. A complex ICU message's placeholders are now compared run by run, as the model sees them.
+- **An XLIFF whose `source-language` is a regional variant of `--from` is accepted** ([khabouss/locale-ai#70](https://github.com/khabouss/locale-ai/issues/70)) — Angular's `extract-i18n` writes `en-US`, so the default `--from en` stopped the first run. (`.xcstrings` stays exact: its reader looks the tag up.)
+- **`dist/cli.js` ships executable** ([khabouss/locale-ai#71](https://github.com/khabouss/locale-ai/issues/71)) — a retried install after a failed one could leave `npx locale-ai` failing with "Permission denied".
+- **A config change now reaches existing translations** ([khabouss/locale-ai#72](https://github.com/khabouss/locale-ai/issues/72)) — adding `doNotTranslate` or a glossary entry after the first run changed nothing until `--overwrite`, which also discards hand edits. A tool-written string that lost a protected term, or that a glossary entry now covers, is re-translated on a normal run; hand edits are never touched.
+- **Angular's `START_*`/`CLOSE_*` placeholder pairs count as tag pairs** ([khabouss/locale-ai#73](https://github.com/khabouss/locale-ai/issues/73)) — an emptied link (`<x id="START_LINK"/> <x id="CLOSE_LINK"/>`) is now reported, and English left inside one is fixed like inside a real tag.
+- **A tag text left partly in English is reported** ([khabouss/locale-ai#74](https://github.com/khabouss/locale-ai/issues/74)) — "<strong>Chat avec us</strong>", "política <link>return</link>": for review, never rewritten.
+- **gettext entries that differ only by `msgctxt` but come back identical are reported** ([khabouss/locale-ai#75](https://github.com/khabouss/locale-ai/issues/75)) — `pgettext("verb", "Order")` and `pgettext("noun", "Order")` both became "Reihenfolge"; now flagged as `context-ignored`.
+- **Built-in glossary: Shop, Cart, Add to cart; `locale-ai models` prints just its own usage** ([khabouss/locale-ai#76](https://github.com/khabouss/locale-ai/issues/76)) — fr "Add to cart" had come back "Ajouter à ma liste d'envies" (Add to wishlist).
+- **Nightly real-world regression suite** ([khabouss/locale-ai#77](https://github.com/khabouss/locale-ai/issues/77)) — `test/realworld.test.ts` checks real fr/es/de models against real tools (`msgfmt -c`, `xmllint`): placeholders inside tags, python-format `.po`, Angular XLIFF, second-run no-ops. Verified to fail on 0.7.29's code for each bug it guards against.
+
 ## 0.7.30
 
 - **Regression in 0.7.29: the untranslated-tag pass corrupted placeholders, e-mails and URLs inside tags** ([khabouss/locale-ai#65](https://github.com/khabouss/locale-ai/issues/65)) — a tag text the model correctly kept unchanged, like `<em>%(title)s</em>` or `<a href="mailto:…">help@example.com</a>`, was taken for untranslated English and re-translated alone without placeholder masking: `%(titre)s`, `%(título)s`, `help@ejemplo.com`, `https://ejemplo.com/docs`. A renamed Python format key fails Django's `compilemessages` and raises `KeyError` at runtime. Only a tag text that's plain words is re-translated now; anything the masker protects is left alone (0/32 damaged strings across 8 placeholder styles and 4 languages, down from 7/32).
