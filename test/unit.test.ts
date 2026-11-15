@@ -3226,3 +3226,21 @@ test("engine: a tag holding only a placeholder, e-mail or URL is never re-transl
   assert.equal(translations.get(sources[2]), "Docs : <a href=\"https://example.com/docs\">https://example.com/docs</a> d'abord.");
   assert.deepEqual(issues, [], "nothing to report: these were translated correctly");
 });
+
+test("check: ICU option text that looks like an argument (=0 {Nobody}) isn't a placeholder; a dropped real one still fails (#69)", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-icu-offset-"));
+  fs.mkdirSync(path.join(dir, "locales"));
+  const offset = "{n, plural, offset:1 =0 {Nobody} =1 {Only {host}} other {{host} and # others}}";
+  fs.writeFileSync(path.join(dir, "locales/en.json"), JSON.stringify({ ok: offset, broken: offset }));
+  fs.writeFileSync(
+    path.join(dir, "locales/fr.json"),
+    JSON.stringify({
+      ok: "{n, plural, offset:1 =0 {Personne} =1 {Seulement {host}} other {{host} et # autres}}",
+      broken: "{n, plural, offset:1 =0 {Personne} =1 {Seulement {host}} other {et # autres}}",
+    }),
+  );
+  const checked = await check({ cwd: dir, from: "en" });
+  const mismatches = checked.issues.filter((i) => i.kind === "placeholder-mismatch") as Array<{ path: string; sourcePlaceholders: string[] }>;
+  assert.deepEqual(mismatches.map((i) => i.path), ["broken"]);
+  assert.ok(!mismatches[0]!.sourcePlaceholders.includes("{Nobody}"), "option text isn't listed as a placeholder");
+});

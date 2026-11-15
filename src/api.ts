@@ -75,10 +75,17 @@ function openLock(config: ProjectConfig, layout: Layout, persist: boolean): { lo
  * The placeholders `check` compares (see `check`), as one sortable key: curly quotes
  * stripped, and dashes left out unless `withDashes` — a dash is typography a translator
  * may reword, but a string this tool wrote should still have its source's.
+ *
+ * A complex ICU message is compared run by run (the texts its extractor hands the
+ * model), not as one raw string: there, an option body that merely looks like a simple
+ * argument (`=0 {Nobody}` → `{Nobody}`) is translatable text, and comparing it as a
+ * placeholder failed every valid translation of it.
  */
+const placeholderTokens = (s: string) => (extractIcu(s)?.units ?? [s]).flatMap((r) => mask(r, "natural").tokens);
+
 function placeholderKey(s: string, withDashes: boolean): string {
-  return mask(s, "natural")
-    .tokens.filter((t) => withDashes || !isDash(t))
+  return placeholderTokens(s)
+    .filter((t) => withDashes || !isDash(t))
     .map(stripCurlyQuotePair)
     .toSorted()
     .join("\u0001");
@@ -572,8 +579,8 @@ export async function check(opts: CheckOptions = {}): Promise<CheckResult> {
           continue;
         }
         const srcMasked = mask(srcVal, "natural");
-        const srcTokens = srcMasked.tokens.toSorted();
-        const tgtTokens = mask(tgtVal, "natural").tokens.toSorted();
+        const srcTokens = placeholderTokens(srcVal).toSorted();
+        const tgtTokens = placeholderTokens(tgtVal).toSorted();
         // Compare with quotes stripped: a translation is free to wrap a placeholder in
         // its own language's quoting convention, use none, or rephrase a possessive
         // away — none of that is a real placeholder mismatch (see stripCurlyQuotePair).
