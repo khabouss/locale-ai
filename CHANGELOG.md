@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Angular XLIFF: the ICU copy inside `<x id="ICU" equiv-text="…"/>` was translated, corrupting the target and breaking `ng build`** ([khabouss/locale-ai#63](https://github.com/khabouss/locale-ai/issues/63)) — when a template mixes text with an ICU expression, Angular extracts the ICU as its own unit and leaves a placeholder in the sentence whose `equiv-text` attribute carries a copy of it. That copy made the whole sentence look like an ICU message, so its options were translated inside the XML tag: invalid XML in Arabic (and `ng build --localize` failing for every locale), the attribute leaking into the visible French text, digits of the `xid` changed in German. An ICU expression is now only detected outside tag markup, so the whole `<x …/>` stays one protected placeholder.
+
 ## 0.7.29
 
 - **Text inside an inline tag was often left in English, and nothing reported it** ([khabouss/locale-ai#59](https://github.com/khabouss/locale-ai/issues/59)) — "Immer noch stecken? <strong>Chat with us</strong>", "Lisez notre <link>return policy</link>". A tag text the model copies over unchanged while translating the rest of the string is now translated on its own and put back inside its tag (in its source's case: "<link>politique de retour</link>"). A capitalized name ("<b>Trailhead</b>") is kept as it is; anything else still in English is reported as `untranslated-tag`.

@@ -16,7 +16,16 @@ type Node =
 const HASH = "{__HASH__}";
 const COMPLEX_RE = /\{\s*[\w.]+\s*,\s*(plural|select|selectordinal)\s*,/;
 
-export const isIcuComplex = (s: string) => COMPLEX_RE.test(s);
+/**
+ * Markup tags. An attribute can carry a copy of an ICU message without the string
+ * itself being one: Angular's XLIFF leaves `<x id="ICU" equiv-text="{n, plural, …}"/>`
+ * in a sentence and extracts the ICU as its own unit. Read as an ICU message, that
+ * copy got translated inside the tag, corrupting the XLIFF (invalid XML, or the
+ * attribute leaking into the visible text) — so it's detected outside tags only.
+ */
+const TAG_RE = /<[^<>]*>/g;
+
+export const isIcuComplex = (s: string) => COMPLEX_RE.test(s.replace(TAG_RE, ""));
 
 class Parser {
   pos = 0;

@@ -3181,3 +3181,21 @@ test("translate: a tool-written string whose placeholders no longer match the so
     ["contact", "edited", "offset"],
   );
 });
+
+test("Angular XLIFF: an ICU copy inside <x id=\"ICU\" equiv-text=\"…\"/> doesn't make a sentence an ICU message (regression)", async () => {
+  // Angular extracts the ICU as its own unit and leaves this placeholder in the
+  // sentence. Read as ICU, its attribute copy got translated inside the tag: invalid
+  // XML in ar (ng build failed for every locale), the attribute leaking into fr text.
+  const icuX = `<x id="ICU" equiv-text="{appointments, plural, =0 {no upcoming appointments} other {{{ appointments }} upcoming appointments}}" xid="3215479450728839650"/>`;
+  const sentence = `Welcome back, <x id="INTERPOLATION" equiv-text="{{ patient }}"/>! You have ${icuX}.`;
+  assert.equal(extractIcu(sentence), undefined);
+
+  // Angular's separately extracted ICU unit is still one, with an <x/> inside an option.
+  const unit = `{VAR_PLURAL, plural, =0 {no upcoming appointments} other {<x id="INTERPOLATION" equiv-text="{{ appointments }}"/> upcoming appointments}}`;
+  assert.deepEqual(extractIcu(unit)!.units, ["no upcoming appointments", `<x id="INTERPOLATION" equiv-text="{{ appointments }}"/> upcoming appointments`]);
+
+  // The whole <x …/> is one protected placeholder, copied through byte for byte.
+  const fr: Record<string, string> = { "Welcome back, <0/>! You have <1/>.": "Bon retour, <0/> ! Vous avez <1/>." };
+  const { translations } = await translateStrings([sentence], [fakeTranslator((s) => fr[s] ?? s)], { sourceLang: "en", targetLang: "fr", batchSize: 4 });
+  assert.equal(translations.get(sentence), `Bon retour, <x id="INTERPOLATION" equiv-text="{{ patient }}"/>\u00a0! Vous avez ${icuX}.`);
+});
