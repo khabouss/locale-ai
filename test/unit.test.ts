@@ -78,6 +78,9 @@ test("mask protects common placeholder syntaxes", () => {
     ["Welcome to @:{'brand'}. Or @.upper:{'brand'}", ["@:{'brand'}", "@.upper:{'brand'}"]],
     // An e-mail address written with the literal @ stays one unit, not "hello" + "{'@'}" + "harbor.cafe".
     ["Email hello{'@'}harbor.cafe or call {0}.", ["hello{'@'}harbor.cafe", "{0}"]],
+    // gettext python-format/c-format's escaped literal percent: collapsed to one "%" by
+    // the model, it read as a broken directive and msgfmt -c rejected the catalog.
+    ["Members get 10%% off, %(name)s.", ["%%", "%(name)s"]],
   ];
   for (const [input, expected] of cases) {
     assert.deepEqual(mask(input).tokens, expected, input);
@@ -3198,4 +3201,28 @@ test("Angular XLIFF: an ICU copy inside <x id=\"ICU\" equiv-text=\"…\"/> doesn
   const fr: Record<string, string> = { "Welcome back, <0/>! You have <1/>.": "Bon retour, <0/> ! Vous avez <1/>." };
   const { translations } = await translateStrings([sentence], [fakeTranslator((s) => fr[s] ?? s)], { sourceLang: "en", targetLang: "fr", batchSize: 4 });
   assert.equal(translations.get(sentence), `Bon retour, <x id="INTERPOLATION" equiv-text="{{ patient }}"/>\u00a0! Vous avez ${icuX}.`);
+});
+
+test("engine: a tag holding only a placeholder, e-mail or URL is never re-translated on its own (0.7.29 regression)", async () => {
+  // The model keeps these right in the sentence; sent alone and unmasked, real models
+  // returned "%(titre)s", "help@ejemplo.com", "https://ejemplo.com/docs".
+  const fr: Record<string, string> = {
+    "We recommend <0>{0}</0> by {1}.": "Nous recommandons <0>{0}</0> par {1}.",
+    "Write to <0>{0}</0> any time.": "Écrivez à <0>{0}</0> à tout moment.",
+    "Docs: <0>{0}</0> first.": "Docs : <0>{0}</0> d'abord.",
+    "%(title)s": "%(titre)s",
+    "help@example.com": "help@ejemplo.com",
+    "https://example.com/docs": "https://ejemplo.com/docs",
+  };
+  const tr = fakeTranslator((s) => fr[s] ?? s);
+  const sources = [
+    "We recommend <em>%(title)s</em> by %(author)s.",
+    "Write to <a href=\"mailto:help@example.com\">help@example.com</a> any time.",
+    "Docs: <a href=\"https://example.com/docs\">https://example.com/docs</a> first.",
+  ];
+  const { translations, issues } = await translateStrings(sources, [tr], { sourceLang: "en", targetLang: "fr", batchSize: 8 });
+  assert.equal(translations.get(sources[0]), "Nous recommandons <em>%(title)s</em> par %(author)s.");
+  assert.equal(translations.get(sources[1]), "Écrivez à <a href=\"mailto:help@example.com\">help@example.com</a> à tout moment.");
+  assert.equal(translations.get(sources[2]), "Docs : <a href=\"https://example.com/docs\">https://example.com/docs</a> d'abord.");
+  assert.deepEqual(issues, [], "nothing to report: these were translated correctly");
 });
