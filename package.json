@@ -32,7 +32,7 @@
     "node": ">=22.18"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node -e \"require('node:fs').chmodSync('dist/cli.js', 0o755)\"",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "node src/cli.ts",
     "test": "node --test test/*.test.ts",
