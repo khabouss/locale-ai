@@ -93,6 +93,7 @@ Run it again and nothing happens. Add or edit a key and only that key is transla
 - [How it works](#how-it-works)
 - [Installation notes](#installation-notes)
 - [Known limitations](#known-limitations)
+- [Reporting problems](#reporting-problems)
 - [Development](#development)
 
 ## What it handles
@@ -243,7 +244,19 @@ From English: af, ar, ca, cs, da, de, es, fi, fr, gl, hi, hu, id, it, nl, oc, pl
 | Usable — review before shipping | it, ar, ru, pl, zh-CN, zh-TW |
 | Untested | the other pairs in `locale-ai models list` |
 
-Measured on a sample app (see `test/fixtures`).
+Measured on a sample app (see `test/fixtures`), then checked on real projects — React/i18next, Vue/vue-i18n, next-intl, Angular, Django, Rails, Android, .NET and Flutter — through each one's own build. Placeholders, markup, plurals and file structure come out intact (that's what the nightly real-world suite guards); the *wording* is the model's, and this is what review turned up:
+
+| Language | What to look for when reviewing |
+|---|---|
+| fr | Short labels out of context ("Add to cart" once came back "Add to wishlist" — now in the built-in glossary). An English word left inside a tag ("<strong>Chat avec us</strong>") is reported for review. |
+| de | Wrong sense for ambiguous nouns ("appointments" → "Ernennungen", nominations). Verb vs noun with the same spelling ("Order" → "Reihenfolge" for both) is reported as `context-ignored` for gettext. |
+| es | A link's text can move out of its tag, leaving it empty or around the wrong word — reported as `empty-tag` / `untranslated-tag`. |
+| it | Uncommon word senses ("roast our beans" → "fagioli", cooking beans). |
+| ar | Every plural category gets the same text (`_zero`…`_many` copy `_other`) — review all six. Brand names can be transliterated: add them to `doNotTranslate` up front. |
+| ru | The `few` form copies `other` ("3 товаров", should be "3 товара") — review `_few`/`_many`. |
+| zh | Times and numbers can be reformatted inside the sentence ("7:00" → "7: 00"). |
+
+**In every language, review**: one-to-three-word UI labels (the hardest case for sentence-level MT — glossary them), every plural form beyond `one`/`other` (added forms copy `other`), and anything the run lists under "worth a quick review". Shipping without a human pass isn't what this tool is for.
 
 Several languages use larger checkpoints than the plain OPUS-MT default — the `opus-mt-tc-big-en-*` models, ~3x larger (270–370 MB int8) and ~1.5x slower, but clearly better:
 
@@ -320,6 +333,13 @@ npm install-scripts approve locale-ai onnxruntime-node
 
 - **No ja/ko yet**: there's no usable OPUS-MT model, so a different model family would be needed.
 - **Rare batch-dependent mistranslation**: a short string can occasionally come out garbled depending on which other strings share its batch; the same string translates fine alone. The built-in models are dynamically int8-quantized per tensor, so a batch's quantization scale depends on the whole batch. Fixing it means re-quantizing with static per-channel scales. Placeholders aren't affected, since they never reach the model as text.
+
+## Reporting problems
+
+Two kinds of report help the most, and each has a template on the [issue tracker](https://github.com/khabouss/locale-ai/issues/new/choose):
+
+- **Bug report** — a placeholder, tag or file came out broken, or your build (`ng build`, `compilemessages`, `aapt2`, `dotnet build`, ...) or `locale-ai check` failed on the output. The exact source string and what came out is usually enough to reproduce it.
+- **Bad translation** — structurally fine, but worded wrong. Common UI labels go into the built-in glossary, and recurring patterns shape the per-language notes in [Languages](#languages). For your own project, `glossary`/`doNotTranslate` fix it right away.
 
 ## Development
 

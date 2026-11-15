@@ -126,3 +126,124 @@ test("XLIFF (Angular): output is well-formed and <x id=\"ICU\" …/> is copied b
     assert.ok(target.includes(icu), `${l}: <x id="ICU" …/> intact in ${target}`);
   }
 });
+
+/** aapt2 and android.jar from the Android SDK (preinstalled on GitHub's ubuntu runners), newest version. */
+function androidTools(): { aapt2: string; androidJar: string } | undefined {
+  const home = process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT;
+  if (!home) return undefined;
+  const newest = (dir: string) => (fs.existsSync(dir) ? fs.readdirSync(dir).sort((a, b) => a.localeCompare(b, undefined, { numeric: true })).at(-1) : undefined);
+  const bt = newest(path.join(home, "build-tools"));
+  const platform = newest(path.join(home, "platforms"));
+  if (!bt || !platform) return undefined;
+  const aapt2 = path.join(home, "build-tools", bt, "aapt2");
+  const androidJar = path.join(home, "platforms", platform, "android.jar");
+  return fs.existsSync(aapt2) && fs.existsSync(androidJar) ? { aapt2, androidJar } : undefined;
+}
+
+test("Android: translated resources compile and link with aapt2 (CDATA, apostrophes, %, currency, @handles)", { ...opts, skip: skip || !androidTools() }, async () => {
+  const tools = androidTools()!;
+  const dir = tmp("android");
+  fs.mkdirSync(path.join(dir, "res/values"), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, "res/values/strings.xml"),
+    `<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+    <string name="app_name" translatable="false">Trailhead</string>
+    <string name="welcome">Welcome back, <xliff:g id="user">%1$s</xliff:g>!</string>
+    <string name="apostrophe">Don\\'t lose your progress</string>
+    <string name="percent" formatted="false">100% done, %s left</string>
+    <string name="cdata"><![CDATA[Visit <a href="https://example.com">our site</a> today]]></string>
+    <string name="price">Price \\u20AC5</string>
+    <string name="handle">Contact us \\@support</string>
+    <plurals name="files">
+        <item quantity="one">%d file selected</item>
+        <item quantity="other">%d files selected</item>
+    </plurals>
+</resources>
+`,
+  );
+  fs.writeFileSync(path.join(dir, "AndroidManifest.xml"), `<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.example.rw"><application android:label="@string/app_name"/></manifest>`);
+  await translateTwice(dir, { input: path.join(dir, "res") });
+  const compiled = path.join(dir, "compiled");
+  fs.mkdirSync(compiled);
+  for (const d of fs.readdirSync(path.join(dir, "res")).filter((d) => d.startsWith("values"))) {
+    execFileSync(tools.aapt2, ["compile", "-o", compiled, path.join(dir, "res", d, "strings.xml")], { stdio: "pipe" });
+  }
+  const flats = fs.readdirSync(compiled).map((f) => path.join(compiled, f));
+  execFileSync(tools.aapt2, ["link", "-o", path.join(dir, "app.apk"), "-I", tools.androidJar, "--manifest", path.join(dir, "AndroidManifest.xml"), ...flats], { stdio: "pipe" });
+  for (const l of LOCALES) {
+    const xml = fs.readFileSync(path.join(dir, `res/values-${l}/strings.xml`), "utf8");
+    assert.match(xml, /<string name="cdata"><!\[CDATA\[/, `${l}: CDATA kept`);
+    assert.match(xml, /€5/, `${l}: currency kept`);
+    assert.match(xml, /@support/, `${l}: handle kept`);
+  }
+});
+
+test(".NET: satellite assemblies build and string.Format fills {0:P0}/{0:C2}", { ...opts, skip: skip || !hasTool("dotnet") }, async () => {
+  const dir = tmp("dotnet");
+  fs.mkdirSync(path.join(dir, "Resources"));
+  fs.writeFileSync(
+    path.join(dir, "App.csproj"),
+    `<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework><InvariantGlobalization>false</InvariantGlobalization></PropertyGroup></Project>`,
+  );
+  fs.writeFileSync(
+    path.join(dir, "Program.cs"),
+    `using System; using System.Globalization; using System.Resources;
+var rm = new ResourceManager("App.Resources.Strings", typeof(Program).Assembly);
+foreach (var c in args) {
+  var ci = new CultureInfo(c);
+  Console.WriteLine(c + "|" + string.Format(ci, rm.GetString("Percent", ci)!, 0.15) + "|" + string.Format(ci, rm.GetString("Price", ci)!, 9.5m) + "|" + string.Format(ci, rm.GetString("Items", ci)!, 3, "Nadia"));
+}
+`,
+  );
+  fs.writeFileSync(
+    path.join(dir, "Resources/Strings.resx"),
+    `<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype"><value>text/microsoft-resx</value></resheader>
+  <data name="Percent" xml:space="preserve"><value>Members get {0:P0} off every order.</value></data>
+  <data name="Price" xml:space="preserve"><value>Total: {0:C2} including tax</value></data>
+  <data name="Items" xml:space="preserve"><value>You have {0} items in your cart, {1}.</value></data>
+</root>
+`,
+  );
+  await translateTwice(dir, { input: path.join(dir, "Resources/Strings.resx") });
+  const out = execFileSync("dotnet", ["run", "-v", "q", "--", ...LOCALES], { cwd: dir, encoding: "utf8", stdio: "pipe" });
+  for (const l of LOCALES) {
+    const line = out.split("\n").find((x) => x.startsWith(`${l}|`)) ?? "";
+    assert.doesNotMatch(line, /\d:[PC]\d/, `${l}: no unformatted format item in ${line}`);
+    assert.match(line, /15/, `${l}: percent formatted in ${line}`);
+    assert.match(line, /Nadia/, `${l}: {1} filled in ${line}`);
+  }
+});
+
+test("Rails: the i18n gem resolves translated YAML (interpolation, plurals, _html keys)", { ...opts, skip: skip || !hasTool("ruby") }, async () => {
+  const dir = tmp("rails");
+  fs.mkdirSync(path.join(dir, "config/locales"), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, "config/locales/en.yml"),
+    `en:
+  shop:
+    greeting: "Welcome back, %{name}!"
+    cart:
+      one: "%{count} item in your cart"
+      other: "%{count} items in your cart"
+    notice_html: "Read our <a href=\\"/terms\\">terms</a> before ordering."
+`,
+  );
+  await translateTwice(dir);
+  const gemHome = path.join(dir, "gems");
+  execFileSync("gem", ["install", "--no-document", "--install-dir", gemHome, "i18n"], { stdio: "pipe" });
+  const script = `require "i18n"
+I18n.load_path += Dir[${JSON.stringify(path.join(dir, "config/locales"))} + "/*.yml"]
+I18n.available_locales = %i[en ${LOCALES.join(" ")}]
+%i[${LOCALES.join(" ")}].each { |l| I18n.with_locale(l) { puts [l, I18n.t("shop.greeting", name: "Nadia"), I18n.t("shop.cart", count: 5), I18n.t("shop.notice_html")].join("|") } }`;
+  const out = execFileSync("ruby", ["-e", script], { env: { ...process.env, GEM_HOME: gemHome, GEM_PATH: gemHome }, encoding: "utf8", stdio: "pipe" });
+  for (const l of LOCALES) {
+    const line = out.split("\n").find((x) => x.startsWith(`${l}|`)) ?? "";
+    assert.match(line, /Nadia/, `${l}: %{name} interpolated in ${line}`);
+    assert.match(line, /5/, `${l}: %{count} interpolated in ${line}`);
+    assert.doesNotMatch(line, /translation missing|%\{/, `${l}: resolved in ${line}`);
+    assert.match(line, /<a href="\/terms">[^<]+<\/a>/, `${l}: _html link kept in ${line}`);
+  }
+});

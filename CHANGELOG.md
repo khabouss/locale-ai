@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+Found by running translated output through each platform's real toolchain — Android `aapt2`, a .NET 8 app with satellite assemblies, Flutter `gen-l10n` + `flutter test`, and Rails' `i18n` gem:
+
+- **.NET/Python format items with a format spec lost their braces** ([khabouss/locale-ai#80](https://github.com/khabouss/locale-ai/issues/80)) — `{0:P0}` → `0:P0`, `{0:C2}` → `0:C2`, so `string.Format` printed them literally. `{index[,align]:format}` (and Python's `{price:.2f}`) is now a protected placeholder.
+- **Currency amounts were changed by the model** ([khabouss/locale-ai#81](https://github.com/khabouss/locale-ai/issues/81)) — "Price €5" came back as "$5" (ar) and "5 yuan" (ru). A currency amount is now protected.
+- **@handles were dropped or mangled** ([khabouss/locale-ai#82](https://github.com/khabouss/locale-ai/issues/82)) — "Contact us @support" lost the handle (fr) or turned it into debris. A standalone `@handle` (or Android `@string/name`) is now protected; e-mails, vue-i18n's `@:key` and `%@` are unaffected.
+- **Android: a CDATA value was written back as plain markup** ([khabouss/locale-ai#83](https://github.com/khabouss/locale-ai/issues/83)) — aapt2 then stored a styled string, so `Html.fromHtml(getString(...))` lost its link in every translation. Written back as CDATA now, with Android's backslash escapes still applied inside it.
+- **The tag-text fix lowercased German nouns** ([khabouss/locale-ai#84](https://github.com/khabouss/locale-ai/issues/84)) — "<a>begriffsbestimmungen</a>". German keeps the model's capital.
+- **Nightly real-world suite** now also builds Android resources with `aapt2`, runs a .NET app with `.resx` satellite assemblies, and resolves Rails YAML with the `i18n` gem.
+- **README**: per-language review notes from the real-project testing, and a "Reporting problems" section; **issue templates** for bug reports and bad translations.
+
 ## 0.7.31
 
 - **`check`: an ICU option body that looks like an argument (`offset:1 =0 {Nobody}`) was compared as a placeholder** ([khabouss/locale-ai#69](https://github.com/khabouss/locale-ai/issues/69)) — every valid translation of it failed CI. A complex ICU message's placeholders are now compared run by run, as the model sees them.

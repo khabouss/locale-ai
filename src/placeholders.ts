@@ -68,6 +68,7 @@ const SOURCES = [
   /@(?:\.\w+)?:\{'[^']*'\}/.source, // @:{'key'} @.lower:{'key'}  vue-i18n linked message, braced form
   /\{'[^']*'\}/.source, // {'@'} {'{'} {'|'}  vue-i18n literal interpolation: how a special character is written as text
   /@(?:\.\w+)?:\(?[\w.-]+\)?/.source, // @:key @.lower:key  vue-i18n linked messages
+  /\{\s*[\w.]+\s*(?:,\s*-?\d+\s*)?:[^{}]*\}/.source, // {0:P0} {0,10:N2} {price:.2f}  .NET composite format / Python str.format with a format spec — "0:P0" without its braces prints literally
   ICU_ARG_SRC, // {name} {0} {count, number}  ICU simple args
   CURLY_QUOTE_PAIR_SRC, // “{0}” or ‘{0}’  a matched pair of curly quotes wrapping a placeholder (see CURLY_QUOTE_PAIR_SRC)
   /'[{}]'/.source, // '{' '}'  MessageFormat's idiom for a literal brace with nothing else inside — too short/unusual on its own for a model to reliably carry through untouched (observed dropped or multiplied on a real hop), unlike '{0}'/'{name}', where the braces' own content is already protected by the ICU-args pattern above
@@ -77,6 +78,8 @@ const SOURCES = [
   /&(?:[a-zA-Z][a-zA-Z0-9]*|#\d+|#x[0-9a-fA-F]+);/.source, // &nbsp; &#39;
   /https?:\/\/[^\s<>"']*[^\s<>"'.,;:!?)\]]/.source, // URLs
   /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/.source, // e-mail addresses
+  /(?<![\w.@%])@[A-Za-z_][\w.]*\w(?:\/[\w.]+)?/.source, // @support @string/app_name  a handle or Android resource reference (not an e-mail, not vue-i18n's @:key, not %@) — dropped or mangled otherwise
+  /[$€£¥₹₩₽]\s?\d+(?:[.,\s]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,\s]\d{3})*(?:[.,]\d{1,2})?\s?[€£¥₹₩₽]/.source, // €5 $9.99 5 € £1,299.00  a currency amount — the model "localized" €5 to $5 or 5 yuan
   /(?<=^|[\s(])(?::[a-zA-Z_]\w*)/.source, // :attribute  laravel
   /\$(?![A-Z]{2,}(?![a-zA-Z0-9_]))[A-Za-z_]\w*/.source, // $name (not "$USD", "$CAD" — currency codes)
   /[©®™]/.source, // copyright/registered/trademark symbols — models drop these on a second (pivoted) hop

@@ -28,11 +28,11 @@ function unescapeAndroidXml(s: string): string {
     });
 }
 function escapeAndroidXml(s: string): string {
-  return s
-    .replace(/\\/g, "\\\\")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
+  return escapeAndroidBackslashes(s.replace(/\\/g, "\\\\").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"), false);
+}
+/** Android's backslash escapes alone — for text inside CDATA, where `&`, `<`, `>` stay raw. */
+function escapeAndroidBackslashes(s: string, escapeBackslash = true): string {
+  return (escapeBackslash ? s.replace(/\\/g, "\\\\") : s)
     .replace(/'/g, "\\'")
     .replace(/"/g, '\\"')
     .replace(/\n/g, "\\n")
@@ -75,6 +75,13 @@ interface AndroidEntry {
   kind: "string" | "array" | "plural";
   /** For kind "string" only: the value was wrapped in a literal `"..."` pair in the source, which Android uses to preserve leading/trailing whitespace that would otherwise be trimmed — kept on write. */
   quoted?: boolean;
+  /**
+   * For kind "string" only: the whole value was one `<![CDATA[...]]>` section in the
+   * source — raw HTML meant for `Html.fromHtml(getString(...))`. Written back as CDATA:
+   * as plain markup, aapt2 stores a styled string instead and `getString()` loses the
+   * link/markup in every translation.
+   */
+  cdata?: boolean;
   /** Any attributes besides `name`/`product`/`translatable` — most commonly `formatted="false"` (required once a value contains a bare `%s`/`%d` alongside other text, or aapt2's format check fails) and `tools:ignore="..."` (lint suppressions). Carried through verbatim since the tag is otherwise rebuilt from scratch on every write. */
   extraAttrs?: string;
 }
@@ -179,9 +186,10 @@ export function readAndroidXmlDoc(file: string, text: string): LocaleDoc {
     if (tag === "string") {
       const trimmed = (inner ?? "").trim();
       const quoted = trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"');
+      const cdata = /^<!\[CDATA\[(?:(?!\]\]>)[\s\S])*\]\]>$/.test(trimmed) || undefined;
       const value = unescapeAndroidXml(quoted ? trimmed.slice(1, -1) : trimmed);
       const isRef = ANDROID_REF_RE.test(value);
-      entries.push({ comment, name, product, translatable: translatable && !isRef, kind: "string", quoted, extraAttrs });
+      entries.push({ comment, name, product, translatable: translatable && !isRef, kind: "string", quoted, cdata, extraAttrs });
       if (translatable && !isRef) data[key] = value;
     } else if (tag === "string-array") {
       entries.push({ comment, name, product, translatable, kind: "array", extraAttrs });
@@ -226,7 +234,9 @@ export function readAndroidXmlDoc(file: string, text: string): LocaleDoc {
         tag = (raw[key] as string).replace(/^<!--[\s\S]*?-->\s*\r?\n\s*/, "");
       } else if (e.kind === "string") {
         const v = typeof obj[key] === "string" ? (obj[key] as string) : "";
-        const escaped = escapeAndroidXmlKeepTags(v);
+        // Inside CDATA the XML characters stay raw, but Android's own backslash escapes
+        // (\', \", \n) still apply: aapt2 rejects an unescaped apostrophe there too.
+        const escaped = e.cdata ? `<![CDATA[${escapeAndroidBackslashes(v)}]]>` : escapeAndroidXmlKeepTags(v);
         tag = `<string name="${escapeAndroidXml(e.name)}"${attr}>${e.quoted ? `"${escaped}"` : escaped}</string>`;
       } else if (e.kind === "array") {
         const items = Array.isArray(obj[key]) ? (obj[key] as unknown[]) : [];
